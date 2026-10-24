@@ -1,0 +1,23 @@
+# The repository always stores LF, and text files are checked out with LF too,
+# regardless of core.autocrlf (Git for Windows enables it by default).
+# gofmt/goimports treat CRLF as a formatting difference, and Docker, compose
+# and .env parsers expect LF, so this applies to every text file.
+* text=auto eol=lf
+
+# Make recipes and shell scripts break on CRLF ("$'\r': command not found"),
+# so they are forced to LF explicitly, even if auto-detection is ever disabled.
+Makefile text eol=lf
+*.mk     text eol=lf
+*.sh     text eol=lf
+
+# cmd.exe scripts require CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary files: no line-ending conversion, no textual diff.
+*.png  binary
+*.jpg  binary
+*.gif  binary
+*.ico  binary
+*.zip  binary
+*.gz   binary

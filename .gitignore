@@ -1,0 +1,21 @@
+# Build output and locally installed tools (see Makefile).
+/bin/
+
+# Test and profiling artifacts.
+/coverage.out
+/coverage.html
+*.test
+*.prof
+
+# Local configuration may contain secrets: never commit it.
+# .env.example is the template with safe placeholders.
+.env
+.env.*
+!.env.example
+
+# Editors and OS files.
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
