@@ -1,0 +1,11 @@
+# Allowlist: the build context contains only what the image build needs.
+# Anything new (local .env files, binaries, editor files) stays out by default.
+*
+!go.mod
+!go.sum
+!cmd/
+!internal/
+!migrations/
+
+# Tests are not needed to build the binaries.
+**/*_test.go
