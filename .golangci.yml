@@ -1,0 +1,38 @@
+# golangci-lint v2 configuration.
+# The linter version is pinned in Makefile (GOLANGCI_LINT_VERSION) and in
+# .github/workflows/ci.yml; keep them in sync.
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  # Explicit list instead of the default set: every enabled linter is visible.
+  default: none
+  enable:
+    - bodyclose     # HTTP response bodies are closed
+    - errcheck      # returned errors are not ignored
+    - errorlint     # errors are compared with errors.Is/As and wrapped with %w
+    - gocritic      # style and performance diagnostics
+    - gosec         # security problems
+    - govet         # suspicious constructs reported by go vet
+    - ineffassign   # assignments that are never used
+    - noctx         # I/O without context.Context
+    - revive        # golint successor: naming, doc comments
+    - sqlclosecheck # sql.Rows and statements are closed
+    - staticcheck   # bugs, simplifications, deprecated APIs
+    - unused        # unused code
+  exclusions:
+    presets:
+      - common-false-positives
+      - std-error-handling
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      # Group project imports separately from third-party ones.
+      local-prefixes:
+        - github.com/artemyaroshev1ch/uptime-monitor
