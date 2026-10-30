@@ -20,6 +20,7 @@ import (
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/platform/healthcheck"
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/platform/httpserver"
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/platform/logger"
+	"github.com/artemyaroshev1ch/uptime-monitor/internal/platform/postgres"
 )
 
 // Build metadata, set by the linker (see LDFLAGS in the Makefile):
@@ -116,7 +117,15 @@ func serve(ctx context.Context, cfg config.API, info observability.BuildInfo, st
 		slog.String("go_version", info.GoVersion),
 	)
 
-	router := httpapi.NewRouter(httpapi.Deps{BuildInfo: info})
+	pool, err := postgres.NewPool(ctx, postgres.PoolConfig{URL: cfg.DB.URL, MaxConns: cfg.DB.MaxConns})
+	if err != nil {
+		return err
+	}
+	// Deferred, so it runs after Serve has returned: in-flight requests have
+	// finished with their connections by then.
+	defer pool.Close()
+
+	router := httpapi.NewRouter(httpapi.Deps{BuildInfo: info, DB: pool, Log: log})
 	if err := httpserver.New("public", router, log, cfg.ShutdownTimeout).Serve(ctx, ln); err != nil {
 		return err
 	}

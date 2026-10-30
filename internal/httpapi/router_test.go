@@ -1,6 +1,10 @@
 package httpapi
 
 import (
+	"context"
+	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,19 +14,29 @@ import (
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/observability"
 )
 
-func TestRouter(t *testing.T) {
-	t.Parallel()
+// fakeDB is a Pinger that returns err.
+type fakeDB struct{ err error }
 
-	router := NewRouter(Deps{
+func (f fakeDB) Ping(context.Context) error { return f.err }
+
+func newTestRouter(db fakeDB) http.Handler {
+	return NewRouter(Deps{
 		BuildInfo: observability.BuildInfo{
 			Version: "1.2.3",
 			Commit:  "abc123",
 			BuiltAt: "2026-01-02T03:04:05Z",
 		},
+		DB:  db,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
+}
+
+func TestRouter(t *testing.T) {
+	t.Parallel()
 
 	tests := []struct {
 		name       string
+		db         fakeDB
 		method     string
 		path       string
 		wantStatus int
@@ -34,6 +48,31 @@ func TestRouter(t *testing.T) {
 			path:       "/healthz",
 			wantStatus: http.StatusOK,
 			wantBody:   `{"status":"ok"}`,
+		},
+		{
+			// Liveness must not depend on the database (see handler.Healthz).
+			name:       "liveness while the database is down",
+			db:         fakeDB{err: errors.New("connection refused")},
+			method:     http.MethodGet,
+			path:       "/healthz",
+			wantStatus: http.StatusOK,
+			wantBody:   `{"status":"ok"}`,
+		},
+		{
+			name:       "readiness",
+			method:     http.MethodGet,
+			path:       "/readyz",
+			wantStatus: http.StatusOK,
+			wantBody:   `{"status":"ok","checks":{"database":"ok"}}`,
+		},
+		{
+			// The error text stays in the log: this port is public.
+			name:       "readiness while the database is down",
+			db:         fakeDB{err: errors.New("connection refused")},
+			method:     http.MethodGet,
+			path:       "/readyz",
+			wantStatus: http.StatusServiceUnavailable,
+			wantBody:   `{"status":"unavailable","checks":{"database":"unavailable"}}`,
 		},
 		{
 			name:       "version",
@@ -70,7 +109,7 @@ func TestRouter(t *testing.T) {
 			req := httptest.NewRequestWithContext(t.Context(), tt.method, tt.path, http.NoBody)
 			rec := httptest.NewRecorder()
 
-			router.ServeHTTP(rec, req)
+			newTestRouter(tt.db).ServeHTTP(rec, req)
 
 			assert.Equal(t, tt.wantStatus, rec.Code)
 			if tt.wantBody != "" {
