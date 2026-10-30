@@ -5,6 +5,9 @@ version: "2"
 
 run:
   timeout: 5m
+  # Integration tests and their helpers are linted too.
+  build-tags:
+    - integration
 
 linters:
   # Explicit list instead of the default set: every enabled linter is visible.
@@ -23,6 +26,11 @@ linters:
     - staticcheck   # bugs, simplifications, deprecated APIs
     - unused        # unused code
   exclusions:
+    rules:
+      # Test fixtures contain fake credentials (connection URLs with passwords).
+      - path: _test\.go
+        linters: [gosec]
+        text: G101
     presets:
       - common-false-positives
       - std-error-handling

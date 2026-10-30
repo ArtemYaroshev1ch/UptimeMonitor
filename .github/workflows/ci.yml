@@ -47,3 +47,14 @@ jobs:
           go-version-file: go.mod
       # Linux runners have a C compiler, so this runs with -race.
       - run: make test
+
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # testcontainers starts PostgreSQL in the runner's Docker daemon.
+      - run: make test-integration

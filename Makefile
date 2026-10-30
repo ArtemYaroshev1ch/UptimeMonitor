@@ -27,8 +27,8 @@ GOEXE := $(shell $(GO) env GOEXE)
 BIN_DIR   := bin
 TOOLS_DIR := $(BIN_DIR)/tools
 
-# Binaries under cmd/. worker and migrate are added in later phases.
-CMDS := api
+# Binaries under cmd/. worker is added in a later phase.
+CMDS := api migrate
 
 # Build metadata injected into package main of every binary via -ldflags.
 # Release tags are vX.Y.Z; the version itself is SemVer without the "v".
@@ -60,7 +60,7 @@ LOAD_ENV := if [ -f .env ]; then set -a; . ./.env; set +a; fi;
 help: ## Show this help
 	@awk 'BEGIN { FS = ":.*## " } \
 		/^##@/ { printf "\n%s\n", substr($$0, 5) } \
-		/^[a-zA-Z0-9_-]+:.*## / { printf "  %-14s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+		/^[a-zA-Z0-9_-]+:.*## / { printf "  %-18s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 # The binary is built and started instead of `go run`: its path stays the same
 # between runs (Windows Firewall asks once per executable path) and signals
@@ -68,6 +68,29 @@ help: ## Show this help
 .PHONY: run-api
 run-api: build ## Build and run the API (loads .env if present)
 	@$(LOAD_ENV) ./$(BIN_DIR)/api$(GOEXE)
+
+.PHONY: migrate-up
+migrate-up: build ## Apply all pending migrations (loads .env)
+	@$(LOAD_ENV) ./$(BIN_DIR)/migrate$(GOEXE) up
+
+.PHONY: migrate-down
+migrate-down: build ## Roll back the most recent migration (loads .env)
+	@$(LOAD_ENV) ./$(BIN_DIR)/migrate$(GOEXE) down
+
+.PHONY: migrate-status
+migrate-status: build ## Show which migrations are applied (loads .env)
+	@$(LOAD_ENV) ./$(BIN_DIR)/migrate$(GOEXE) status
+
+# The next number is the highest existing prefix + 1. awk reads "0009" as 9,
+# where sh arithmetic would treat a leading zero as octal.
+.PHONY: migrate-create
+migrate-create: ## Create an empty migration: make migrate-create name=add_monitors
+	@echo "$(name)" | grep -Eq '^[a-z0-9_]+$$' \
+		|| { echo "usage: make migrate-create name=<snake_case_name>" >&2; exit 1; }
+	@next=$$(ls migrations | awk -F_ '/^[0-9]+_.*\.sql$$/ { n = $$1 + 0; if (n > max) max = n } END { printf "%04d", max + 1 }'); \
+		file="migrations/$${next}_$(name).sql"; \
+		printf -- '-- +goose Up\n\n-- +goose Down\n' > "$$file"; \
+		echo "created $$file"
 
 .PHONY: build
 build: ## Build binaries into bin/
@@ -77,6 +100,21 @@ build: ## Build binaries into bin/
 clean: ## Remove built binaries and coverage reports
 	rm -f $(addprefix $(BIN_DIR)/,$(addsuffix $(GOEXE),$(CMDS))) coverage.out coverage.html
 
+##@ Local stack (Docker Compose)
+
+# --wait returns once the healthchecks pass, so `make up migrate-up` works.
+.PHONY: up
+up: ## Start PostgreSQL in the background and wait until it is healthy
+	docker compose up -d --wait
+
+.PHONY: down
+down: ## Stop the stack (the database volume is kept)
+	docker compose down
+
+.PHONY: logs
+logs: ## Follow logs of the stack
+	docker compose logs -f
+
 ##@ Quality
 
 .PHONY: test
@@ -85,6 +123,12 @@ ifndef RACE
 	@echo "note: cgo is disabled (no C compiler), running tests without -race"
 endif
 	$(GO) test $(RACE) ./...
+
+# -count=1 disables the test cache: results depend on the containers, not
+# only on the code.
+.PHONY: test-integration
+test-integration: ## Run unit and integration tests (needs Docker)
+	$(GO) test $(RACE) -tags integration -count=1 ./...
 
 .PHONY: cover
 cover: ## Run unit tests with coverage, write coverage.html

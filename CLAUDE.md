@@ -92,10 +92,10 @@ This is the operations API. Do not change it without updating `uptime-infra`.
 ## Make targets
 
 Run `make help` for the current list. Implemented now: `help`, `run-api`,
-`build`, `clean`, `test`, `cover`, `lint`, `fmt`, `tidy`, `tools`.
-Planned by later phases: `run-worker`, `test-integration`, `migrate-up`,
-`migrate-down`, `migrate-create name=...`, `docker-build`, `up`, `down`,
-`logs`, `smoke`.
+`migrate-up`, `migrate-down`, `migrate-status`, `migrate-create name=...`,
+`build`, `clean`, `up`, `down`, `logs` (compose: PostgreSQL only so far),
+`test`, `test-integration` (needs Docker), `cover`, `lint`, `fmt`, `tidy`,
+`tools`. Planned by later phases: `run-worker`, `docker-build`, `smoke`.
 
 - `make lint test` — the phase gate.
 - golangci-lint is pinned in the Makefile (`GOLANGCI_LINT_VERSION`, keep in
