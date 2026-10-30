@@ -1,0 +1,38 @@
+# Local development stack. For now only PostgreSQL; the application services
+# (migrate, api, worker) join in a later phase.
+#
+#   make up        start in the background
+#   make down      stop (data is kept in the "pgdata" volume)
+#   make logs      follow logs
+#
+# Credentials below are for a throwaway local database bound to 127.0.0.1;
+# override them in .env (docker compose reads it automatically).
+
+name: uptime-monitor
+
+services:
+  postgres:
+    # Pinned exactly (never "latest"). Keep in sync with pgtest.Image, so
+    # integration tests run against the same server version.
+    image: postgres:16.15-alpine3.24
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-uptime}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-uptime}
+      POSTGRES_DB: ${POSTGRES_DB:-uptime}
+    ports:
+      # Loopback only: the database is never exposed to the network.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # pg_isready succeeds once the server accepts connections. $$ escapes
+      # compose interpolation, so the variables expand inside the container.
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
