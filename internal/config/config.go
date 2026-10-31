@@ -61,6 +61,12 @@ type API struct {
 	// from X-Forwarded-For. Enable it only behind a reverse proxy that sets
 	// that header; otherwise clients can spoof their IP and dodge the limit.
 	TrustProxyHeaders bool `env:"TRUST_PROXY_HEADERS" envDefault:"false"`
+
+	MaxMonitorsPerUser int `env:"MAX_MONITORS_PER_USER" envDefault:"20"`
+	// AllowPrivateTargets lets monitors point at loopback and private
+	// networks. For local development only: in production it turns the
+	// service into a proxy into the internal network (SSRF).
+	AllowPrivateTargets bool `env:"ALLOW_PRIVATE_TARGETS" envDefault:"false"`
 }
 
 // Migrate is the configuration of cmd/migrate. It uses one connection, so
@@ -139,6 +145,9 @@ func (a Auth) validate() error {
 
 func (c API) validate() error {
 	errs := []error{c.Common.validate(), c.DB.validate(), c.Auth.validate()}
+	if c.MaxMonitorsPerUser < 1 {
+		errs = append(errs, fmt.Errorf("MAX_MONITORS_PER_USER must be at least 1, got %d", c.MaxMonitorsPerUser))
+	}
 	if _, _, err := net.SplitHostPort(c.HTTPAddr); err != nil {
 		errs = append(errs, fmt.Errorf("HTTP_ADDR must be host:port, got %q: %w", c.HTTPAddr, err))
 	}

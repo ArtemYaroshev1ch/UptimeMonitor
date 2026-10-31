@@ -296,3 +296,78 @@ authentication, to every record logged with that context.
 header and does not reach slog. A per-request `*slog.Logger` in the context:
 every function would have to fetch the logger from the context instead of
 using its injected one.
+
+## 016. Monitor limit: enforced in one transaction under a user row lock
+
+*2026-10-31, Phase 3*
+
+**Context.** `MAX_MONITORS_PER_USER` (20) must hold even when a client sends
+several create requests at once. "Count, then insert" in the service races:
+two requests of a user with 19 monitors both see 19 and both insert.
+
+**Decision.** The repository runs `SELECT ... FROM users WHERE id = $1 FOR
+UPDATE`, counts and inserts in one transaction. Concurrent creates of the same
+user queue on the row lock; other users are not affected. An integration test
+fires 10 parallel creates at a limit of 3 and expects exactly 3. A reached
+limit is `409 conflict` with the message `Limit reached`: the request clashes
+with the current state, and deleting a monitor resolves it.
+
+**Alternatives.** `SERIALIZABLE` isolation: correct, but the losing
+transaction fails with a serialization error that has to be retried. A
+trigger: hides business rules in the database. 403 or 422: neither is in the
+closed list of error codes.
+
+## 017. PATCH semantics: absent keeps, null clears, create is a patch of defaults
+
+*2026-10-31, Phase 3*
+
+**Context.** `expected_status` and `keyword` are nullable: a client must be
+able to clear them. With pointer fields `{}` and `{"keyword": null}` decode to
+the same nil.
+
+**Decision.** Input fields are `service.Optional[T]` (Set/Null/Value; its
+`UnmarshalJSON` runs only for keys present in the body). `null` clears a
+nullable field and is a validation error (`must not be null`) for the others.
+Create applies the same patch to `domain.DefaultMonitorSettings()`, so create
+and update share one code path and one set of rules (validator tags on
+`domain.MonitorSettings`, mirroring the table's CHECK constraints). Update
+loads the row `FOR UPDATE`, applies, validates and saves in one transaction,
+so concurrent PATCHes of different fields are not lost. The URL policy runs
+on create and when the URL changes, so a monitor created under a looser
+policy can still be paused or renamed.
+
+**Alternatives.** JSON Merge Patch (RFC 7396) on a generic map: the same
+semantics, but untyped. PUT with the full object: clients would have to
+resend every field to pause a monitor.
+
+## 018. Rescheduling on update
+
+*2026-10-31, Phase 3*
+
+**Context.** `next_check_at` drives the scheduler (Phase 4). After an edit,
+waiting out the old interval (up to 24 h) would be surprising.
+
+**Decision.** A resumed monitor and one with a new URL are due at once
+(`next_check_at = now`). A shortened interval moves the next check to at most
+`now + interval`. Other edits keep the schedule; a paused monitor is not
+rescheduled.
+
+## 019. Syntactic SSRF rules for monitor URLs
+
+*2026-10-31, Phase 3*
+
+**Context.** PROMPT.md section 11 requires blocking internal targets at
+connect time (Phase 4). Rejecting obviously internal URLs when a monitor is
+saved gives the user an immediate, field-level error.
+
+**Decision.** `checker.TargetPolicy.ValidateURL`: `http`/`https` only, at
+most 2048 characters, no `user:password@` (it would be stored, returned and
+logged in plain text), and no blocked IP literal (`checker.IsBlockedIP`,
+shared with the Phase 4 dialer; IPv4-mapped IPv6 is unmapped first), no
+`localhost`/`*.localhost`, no host whose last label is numeric (`2130706433`,
+`0x7f.1`, `127.1`: inet_aton shorthands for IPs). `ALLOW_PRIVATE_TARGETS`
+relaxes only the address rules. A malformed monitor ID in the path is `404`,
+like an unknown or foreign one.
+
+**Alternatives.** Resolving the hostname when saving: slower, and worthless
+against DNS rebinding, which the connect-time check handles anyway.
