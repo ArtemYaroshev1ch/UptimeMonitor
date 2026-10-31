@@ -49,6 +49,12 @@ func TestError(t *testing.T) {
 			wantBody:   `{"error":{"code":"conflict","message":"Resource already exists"}}`,
 		},
 		{
+			name:       "limit",
+			err:        fmt.Errorf("create: %w", domain.ErrLimitExceeded),
+			wantStatus: http.StatusConflict,
+			wantBody:   `{"error":{"code":"conflict","message":"Limit reached"}}`,
+		},
+		{
 			// The cause stays in the log; the client learns nothing about it.
 			name:       "internal",
 			err:        errors.New("dial tcp 10.0.0.5:5432: connection refused"),

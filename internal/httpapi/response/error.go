@@ -55,6 +55,9 @@ func Error(w http.ResponseWriter, r *http.Request, log *slog.Logger, err error) 
 		WriteError(w, http.StatusNotFound, CodeNotFound, "Resource not found", nil)
 	case errors.Is(err, domain.ErrConflict):
 		WriteError(w, http.StatusConflict, CodeConflict, "Resource already exists", nil)
+	case errors.Is(err, domain.ErrLimitExceeded):
+		// A conflict with the current state: deleting something resolves it.
+		WriteError(w, http.StatusConflict, CodeConflict, "Limit reached", nil)
 	default:
 		log.ErrorContext(r.Context(), "request failed", slog.Any("error", err))
 		WriteError(w, http.StatusInternalServerError, CodeInternal, "Internal server error", nil)

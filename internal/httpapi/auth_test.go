@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -19,72 +18,38 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/auth"
+	"github.com/artemyaroshev1ch/uptime-monitor/internal/checker"
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/domain"
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/httpapi/middleware"
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/observability"
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/platform/clock"
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/platform/logger"
+	"github.com/artemyaroshev1ch/uptime-monitor/internal/repository/memory"
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/service"
 )
 
-// memUsers is an in-memory service.UserRepository. The HTTP tests run the
-// real service, auth and middleware; only storage is faked.
-type memUsers struct {
-	mu    sync.Mutex
-	users []domain.User
-}
-
-func (m *memUsers) Create(_ context.Context, email, hash string) (domain.User, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, u := range m.users {
-		if u.Email == email {
-			return domain.User{}, domain.ErrConflict
-		}
-	}
-	u := domain.User{
-		ID:           uuid.New(),
-		Email:        email,
-		PasswordHash: hash,
-		CreatedAt:    time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
-	}
-	m.users = append(m.users, u)
-	return u, nil
-}
-
-func (m *memUsers) find(match func(domain.User) bool) (domain.User, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, u := range m.users {
-		if match(u) {
-			return u, nil
-		}
-	}
-	return domain.User{}, domain.ErrNotFound
-}
-
-func (m *memUsers) GetByEmail(_ context.Context, email string) (domain.User, error) {
-	return m.find(func(u domain.User) bool { return u.Email == email })
-}
-
-func (m *memUsers) GetByID(_ context.Context, id uuid.UUID) (domain.User, error) {
-	return m.find(func(u domain.User) bool { return u.ID == id })
-}
-
 var testSecret = []byte("0123456789abcdef0123456789abcdef")
 
+// testMonitorLimit is MAX_MONITORS_PER_USER in HTTP tests.
+const testMonitorLimit = 3
+
+// testAPI is the full router with real services, auth and middleware; only
+// storage is in memory.
 type testAPI struct {
-	router http.Handler
-	clock  *clock.Fake
-	tokens *auth.Tokens
+	router   http.Handler
+	clock    *clock.Fake
+	tokens   *auth.Tokens
+	auth     *service.Auth
+	monitors *memory.Monitors
 }
 
 func newTestAPI(t *testing.T, db fakeDB, log *slog.Logger) testAPI {
 	t.Helper()
 	clk := clock.NewFake(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))
 	tokens := auth.NewTokens(testSecret, time.Hour, clk)
-	svc, err := service.NewAuth(&memUsers{}, auth.NewPasswords(bcrypt.MinCost), tokens)
+	authSvc, err := service.NewAuth(memory.NewUsers(clk.Now), auth.NewPasswords(bcrypt.MinCost), tokens)
 	require.NoError(t, err)
+	monitors := memory.NewMonitors(clk.Now)
 
 	router := NewRouter(Deps{
 		BuildInfo: observability.BuildInfo{
@@ -95,11 +60,23 @@ func newTestAPI(t *testing.T, db fakeDB, log *slog.Logger) testAPI {
 		DB:          db,
 		Log:         log,
 		Clock:       clk,
-		Auth:        svc,
+		Auth:        authSvc,
+		Monitors:    service.NewMonitors(monitors, checker.NewTargetPolicy(false), clk, testMonitorLimit),
 		Tokens:      tokens,
 		AuthLimiter: middleware.NewRateLimiter(10, time.Minute, clk),
 	})
-	return testAPI{router: router, clock: clk, tokens: tokens}
+	return testAPI{router: router, clock: clk, tokens: tokens, auth: authSvc, monitors: monitors}
+}
+
+// userToken registers a user through the service (bypassing the auth rate
+// limit, which tests with many users would hit) and returns a valid token.
+func (a testAPI) userToken(t *testing.T, email string) string {
+	t.Helper()
+	u, err := a.auth.Register(t.Context(), service.Credentials{Email: email, Password: "password-1"})
+	require.NoError(t, err)
+	token, _, err := a.tokens.Issue(u.ID)
+	require.NoError(t, err)
+	return token
 }
 
 // do sends a request. body is sent as is; token, if set, as a bearer token.
