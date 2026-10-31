@@ -22,8 +22,10 @@ type Store interface {
 	// ClaimDue returns up to limit due monitors and moves them to their next
 	// interval, so no other worker gets them.
 	ClaimDue(ctx context.Context, limit int) ([]domain.CheckTarget, error)
-	// SaveResult returns domain.ErrNotFound if the monitor was deleted.
-	SaveResult(ctx context.Context, monitorID uuid.UUID, res domain.CheckResult) error
+	// SaveResult stores the result, updates the monitor and opens or
+	// resolves an incident. It returns domain.ErrNotFound if the monitor
+	// was deleted.
+	SaveResult(ctx context.Context, monitorID uuid.UUID, res domain.CheckResult) (domain.IncidentChange, error)
 }
 
 // Checker checks one target (checker.Checker).
@@ -157,7 +159,8 @@ func (s *Scheduler) run(ctx context.Context, t domain.CheckTarget) {
 
 	saveCtx, cancel := context.WithTimeout(ctx, s.cfg.SaveTimeout)
 	defer cancel()
-	if err := s.store.SaveResult(saveCtx, t.MonitorID, res); err != nil {
+	change, err := s.store.SaveResult(saveCtx, t.MonitorID, res)
+	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
 			s.log.DebugContext(ctx, "monitor deleted during its check")
 			return
@@ -172,6 +175,26 @@ func (s *Scheduler) run(ctx context.Context, t domain.CheckTarget) {
 		slog.Int("response_time_ms", res.ResponseTimeMs),
 		slog.Duration("lag", lag),
 	)
+	s.logIncident(ctx, change)
+}
+
+// logIncident records incident transitions: they are rare and exactly what
+// an operator looks for when a user asks "why did I get paged".
+func (s *Scheduler) logIncident(ctx context.Context, change domain.IncidentChange) {
+	switch {
+	case change.Opened != nil:
+		s.log.WarnContext(ctx, "incident opened",
+			slog.String("incident_id", change.Opened.ID.String()),
+			slog.String("cause_kind", string(change.Opened.CauseKind)),
+			slog.Time("started_at", change.Opened.StartedAt),
+		)
+	case change.Resolved != nil:
+		inc := change.Resolved
+		s.log.InfoContext(ctx, "incident resolved",
+			slog.String("incident_id", inc.ID.String()),
+			slog.Duration("duration", inc.ResolvedAt.Sub(inc.StartedAt)),
+		)
+	}
 }
 
 // drain waits for running checks, aborting them after ShutdownTimeout.
