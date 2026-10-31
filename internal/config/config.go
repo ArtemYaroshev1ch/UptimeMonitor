@@ -37,12 +37,30 @@ type Database struct {
 	MaxConns int32  `env:"DB_MAX_CONNS"                    envDefault:"10"`
 }
 
+// MinJWTSecretLen is the minimum JWT_SECRET length in bytes. HS256 uses a
+// 256-bit key; a shorter secret is easier to brute-force offline from a
+// single leaked token.
+const MinJWTSecretLen = 32
+
+// Auth holds authentication settings.
+type Auth struct {
+	// JWTSecret signs access tokens. Anyone who knows it can forge a token
+	// for any user, so it must never be logged.
+	JWTSecret      string        `env:"JWT_SECRET,required,notEmpty"`
+	AccessTokenTTL time.Duration `env:"ACCESS_TOKEN_TTL"                envDefault:"12h"`
+}
+
 // API is the configuration of cmd/api.
 type API struct {
 	Common
-	DB Database
+	DB   Database
+	Auth Auth
 
 	HTTPAddr string `env:"HTTP_ADDR" envDefault:":8080"`
+	// TrustProxyHeaders makes the API take the client IP (for rate limiting)
+	// from X-Forwarded-For. Enable it only behind a reverse proxy that sets
+	// that header; otherwise clients can spoof their IP and dodge the limit.
+	TrustProxyHeaders bool `env:"TRUST_PROXY_HEADERS" envDefault:"false"`
 }
 
 // Migrate is the configuration of cmd/migrate. It uses one connection, so
@@ -107,8 +125,20 @@ func (d Database) validate() error {
 	return nil
 }
 
+func (a Auth) validate() error {
+	var errs []error
+	if len(a.JWTSecret) < MinJWTSecretLen {
+		// The value itself is not reported: it is a secret.
+		errs = append(errs, fmt.Errorf("JWT_SECRET must be at least %d bytes, got %d", MinJWTSecretLen, len(a.JWTSecret)))
+	}
+	if a.AccessTokenTTL <= 0 {
+		errs = append(errs, fmt.Errorf("ACCESS_TOKEN_TTL must be positive, got %s", a.AccessTokenTTL))
+	}
+	return errors.Join(errs...)
+}
+
 func (c API) validate() error {
-	errs := []error{c.Common.validate(), c.DB.validate()}
+	errs := []error{c.Common.validate(), c.DB.validate(), c.Auth.validate()}
 	if _, _, err := net.SplitHostPort(c.HTTPAddr); err != nil {
 		errs = append(errs, fmt.Errorf("HTTP_ADDR must be host:port, got %q: %w", c.HTTPAddr, err))
 	}

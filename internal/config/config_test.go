@@ -11,13 +11,16 @@ import (
 
 const testDSN = "postgres://uptime:secret@localhost:5432/uptime"
 
-// unset marks a variable that withDSN must leave out of the environment.
+// testSecret is 32 bytes, the minimum JWT_SECRET length.
+const testSecret = "0123456789abcdef0123456789abcdef"
+
+// unset marks a variable that withRequired must leave out of the environment.
 const unset = "\x00unset"
 
-// withDSN returns environ plus a valid DATABASE_URL, so error cases fail
+// withRequired returns environ plus valid required variables, so error cases fail
 // only for the reason they test. A value of unset removes the variable.
-func withDSN(environ map[string]string) map[string]string {
-	out := map[string]string{"DATABASE_URL": testDSN}
+func withRequired(environ map[string]string) map[string]string {
+	out := map[string]string{"DATABASE_URL": testDSN, "JWT_SECRET": testSecret}
 	for k, v := range environ {
 		if v == unset {
 			delete(out, k)
@@ -38,7 +41,7 @@ func TestLoadAPI(t *testing.T) {
 	}{
 		{
 			name:    "defaults",
-			environ: map[string]string{"DATABASE_URL": testDSN},
+			environ: map[string]string{},
 			want: API{
 				Common: Common{
 					Env:             EnvDev,
@@ -46,18 +49,21 @@ func TestLoadAPI(t *testing.T) {
 					ShutdownTimeout: 25 * time.Second,
 				},
 				DB:       Database{URL: testDSN, MaxConns: 10},
+				Auth:     Auth{JWTSecret: testSecret, AccessTokenTTL: 12 * time.Hour},
 				HTTPAddr: ":8080",
 			},
 		},
 		{
 			name: "overrides",
 			environ: map[string]string{
-				"APP_ENV":          "prod",
-				"LOG_LEVEL":        "debug",
-				"SHUTDOWN_TIMEOUT": "5s",
-				"HTTP_ADDR":        "127.0.0.1:9000",
-				"DATABASE_URL":     testDSN,
-				"DB_MAX_CONNS":     "4",
+				"APP_ENV":             "prod",
+				"LOG_LEVEL":           "debug",
+				"SHUTDOWN_TIMEOUT":    "5s",
+				"HTTP_ADDR":           "127.0.0.1:9000",
+				"DATABASE_URL":        testDSN,
+				"DB_MAX_CONNS":        "4",
+				"ACCESS_TOKEN_TTL":    "1h",
+				"TRUST_PROXY_HEADERS": "true",
 			},
 			want: API{
 				Common: Common{
@@ -65,13 +71,15 @@ func TestLoadAPI(t *testing.T) {
 					LogLevel:        slog.LevelDebug,
 					ShutdownTimeout: 5 * time.Second,
 				},
-				DB:       Database{URL: testDSN, MaxConns: 4},
-				HTTPAddr: "127.0.0.1:9000",
+				DB:                Database{URL: testDSN, MaxConns: 4},
+				Auth:              Auth{JWTSecret: testSecret, AccessTokenTTL: time.Hour},
+				TrustProxyHeaders: true,
+				HTTPAddr:          "127.0.0.1:9000",
 			},
 		},
 		{
 			name:    "log level is case-insensitive",
-			environ: map[string]string{"LOG_LEVEL": "WARN", "DATABASE_URL": testDSN},
+			environ: map[string]string{"LOG_LEVEL": "WARN"},
 			want: API{
 				Common: Common{
 					Env:             EnvDev,
@@ -79,6 +87,7 @@ func TestLoadAPI(t *testing.T) {
 					ShutdownTimeout: 25 * time.Second,
 				},
 				DB:       Database{URL: testDSN, MaxConns: 10},
+				Auth:     Auth{JWTSecret: testSecret, AccessTokenTTL: 12 * time.Hour},
 				HTTPAddr: ":8080",
 			},
 		},
@@ -88,7 +97,7 @@ func TestLoadAPI(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got, err := loadAPI(tt.environ)
+			got, err := loadAPI(withRequired(tt.environ))
 
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
@@ -157,13 +166,28 @@ func TestLoadAPIErrors(t *testing.T) {
 			environ: map[string]string{"DB_MAX_CONNS": "0"},
 			wantErr: []string{"DB_MAX_CONNS must be at least 1"},
 		},
+		{
+			name:    "JWT secret is required",
+			environ: map[string]string{"JWT_SECRET": unset},
+			wantErr: []string{"JWT_SECRET"},
+		},
+		{
+			name:    "short JWT secret",
+			environ: map[string]string{"JWT_SECRET": "too-short"},
+			wantErr: []string{"JWT_SECRET must be at least 32 bytes, got 9"},
+		},
+		{
+			name:    "zero token TTL",
+			environ: map[string]string{"ACCESS_TOKEN_TTL": "0s"},
+			wantErr: []string{"ACCESS_TOKEN_TTL must be positive"},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := loadAPI(withDSN(tt.environ))
+			_, err := loadAPI(withRequired(tt.environ))
 
 			require.Error(t, err)
 			for _, want := range tt.wantErr {
