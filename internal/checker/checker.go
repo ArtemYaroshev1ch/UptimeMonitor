@@ -64,7 +64,9 @@ type Checker struct {
 // blockedError is returned when a connection to a blocked address is refused.
 type blockedError struct{ addr string }
 
-func (e blockedError) Error() string { return "connection to " + e.addr + " is blocked (non-public address)" }
+func (e blockedError) Error() string {
+	return "connection to " + e.addr + " is blocked (non-public address)"
+}
 
 var errTooManyRedirects = fmt.Errorf("stopped after %d redirects", MaxRedirects)
 

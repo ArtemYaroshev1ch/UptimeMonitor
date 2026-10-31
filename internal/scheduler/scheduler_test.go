@@ -74,8 +74,8 @@ func (f *fakeStore) savedCount() int {
 // context ends) when release is set. It tracks how many checks run at once.
 type fakeChecker struct {
 	release      chan struct{}
-	running, max atomic.Int32
-	aborted      atomic.Int32
+	running, max atomic.Int64
+	aborted      atomic.Int64
 }
 
 func (f *fakeChecker) Check(ctx context.Context, _ domain.CheckTarget) domain.CheckResult {
@@ -155,9 +155,9 @@ func TestSchedulerRespectsConcurrency(t *testing.T) {
 	s := New(store, checker, discard(), clock.System{}, cfg)
 
 	stop := start(t, s)
-	require.Eventually(t, func() bool { return checker.running.Load() == int32(cfg.Concurrency) }, 5*time.Second, time.Millisecond)
+	require.Eventually(t, func() bool { return checker.running.Load() == int64(cfg.Concurrency) }, 5*time.Second, time.Millisecond)
 	time.Sleep(50 * time.Millisecond) // several more ticks while saturated
-	assert.Equal(t, int32(cfg.Concurrency), checker.max.Load())
+	assert.Equal(t, int64(cfg.Concurrency), checker.max.Load())
 	close(checker.release)
 	stop()
 
@@ -219,7 +219,7 @@ func TestSchedulerShutdownTimeout(t *testing.T) {
 
 	stop()
 
-	assert.Equal(t, int32(1), checker.aborted.Load())
+	assert.Equal(t, int64(1), checker.aborted.Load())
 }
 
 func TestSchedulerClaimError(t *testing.T) {
