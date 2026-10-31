@@ -95,11 +95,18 @@ func get(t *testing.T, url string) int {
 	t.Helper()
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, http.NoBody)
 	require.NoError(t, err)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient.Do(req)
 	require.NoError(t, err)
+	_, _ = io.Copy(io.Discard, resp.Body)
 	require.NoError(t, resp.Body.Close())
 	return resp.StatusCode
 }
+
+// testClient opens a fresh connection per request and closes it afterwards.
+// http.DefaultClient may dial a spare connection that never sends a request;
+// http.Server.Shutdown waits up to 5 s for such connections, which made the
+// shutdown in TestRunServesUntilCancelled hit its own 5 s timeout under -race.
+var testClient = &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
 
 func waitForListenAddr(t *testing.T, logs io.Reader) string {
 	t.Helper()

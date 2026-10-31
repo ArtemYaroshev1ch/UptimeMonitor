@@ -118,8 +118,12 @@ func TestRunServesUntilCancelled(t *testing.T) {
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+addr+"/healthz", http.NoBody)
 	require.NoError(t, err)
-	resp, err := http.DefaultClient.Do(req)
+	// No keep-alive, so no spare connection delays the shutdown below (see
+	// the same client in cmd/worker/main_test.go).
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	resp, err := client.Do(req)
 	require.NoError(t, err)
+	_, _ = io.Copy(io.Discard, resp.Body)
 	require.NoError(t, resp.Body.Close())
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
