@@ -143,8 +143,9 @@ func serve(ctx context.Context, cfg config.API, info observability.BuildInfo, st
 	if cfg.AllowPrivateTargets {
 		log.Warn("ALLOW_PRIVATE_TARGETS is on: monitors may target internal addresses; never use this in production")
 	}
-	monitorSvc := svc.NewMonitors(repository.NewMonitors(pool),
-		checker.NewTargetPolicy(cfg.AllowPrivateTargets), clk, cfg.MaxMonitorsPerUser)
+	monitorRepo := repository.NewMonitors(pool)
+	monitorSvc := svc.NewMonitors(monitorRepo, checker.NewTargetPolicy(cfg.AllowPrivateTargets), clk, cfg.MaxMonitorsPerUser)
+	checkSvc := svc.NewChecks(monitorRepo, repository.NewChecks(pool), clk)
 
 	router := httpapi.NewRouter(httpapi.Deps{
 		BuildInfo:         info,
@@ -153,6 +154,7 @@ func serve(ctx context.Context, cfg config.API, info observability.BuildInfo, st
 		Clock:             clk,
 		Auth:              authSvc,
 		Monitors:          monitorSvc,
+		Checks:            checkSvc,
 		Tokens:            tokens,
 		AuthLimiter:       middleware.NewRateLimiter(authRateLimit, time.Minute, clk),
 		TrustProxyHeaders: cfg.TrustProxyHeaders,

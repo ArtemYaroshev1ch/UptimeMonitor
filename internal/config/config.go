@@ -95,6 +95,58 @@ func loadAPI(environ map[string]string) (API, error) {
 	return cfg, nil
 }
 
+// Worker is the configuration of cmd/worker.
+type Worker struct {
+	Common
+	DB Database
+
+	// OpsAddr serves /healthz and /readyz (and /metrics from Phase 7). It
+	// must not be published outside the host network.
+	OpsAddr string `env:"OPS_ADDR" envDefault:":9091"`
+	// Concurrency is the number of checks running at once.
+	Concurrency int `env:"WORKER_CONCURRENCY" envDefault:"20"`
+	// BatchSize is the maximum number of monitors claimed per tick.
+	BatchSize int `env:"SCHEDULER_BATCH_SIZE" envDefault:"50"`
+	// RetentionDays is how long check results are kept.
+	RetentionDays int `env:"CHECKS_RETENTION_DAYS" envDefault:"30"`
+	// AllowPrivateTargets: see API.AllowPrivateTargets. The worker enforces
+	// it when connecting; the API when a monitor is saved.
+	AllowPrivateTargets bool `env:"ALLOW_PRIVATE_TARGETS" envDefault:"false"`
+}
+
+// LoadWorker reads the cmd/worker configuration from the process environment.
+func LoadWorker() (Worker, error) {
+	return loadWorker(nil)
+}
+
+func loadWorker(environ map[string]string) (Worker, error) {
+	cfg, err := env.ParseAsWithOptions[Worker](env.Options{Environment: environ})
+	if err != nil {
+		return Worker{}, fmt.Errorf("config: %w", err)
+	}
+	if err := cfg.validate(); err != nil {
+		return Worker{}, fmt.Errorf("config: %w", err)
+	}
+	return cfg, nil
+}
+
+func (c Worker) validate() error {
+	errs := []error{c.Common.validate(), c.DB.validate()}
+	if _, _, err := net.SplitHostPort(c.OpsAddr); err != nil {
+		errs = append(errs, fmt.Errorf("OPS_ADDR must be host:port, got %q: %w", c.OpsAddr, err))
+	}
+	if c.Concurrency < 1 {
+		errs = append(errs, fmt.Errorf("WORKER_CONCURRENCY must be at least 1, got %d", c.Concurrency))
+	}
+	if c.BatchSize < 1 {
+		errs = append(errs, fmt.Errorf("SCHEDULER_BATCH_SIZE must be at least 1, got %d", c.BatchSize))
+	}
+	if c.RetentionDays < 1 {
+		errs = append(errs, fmt.Errorf("CHECKS_RETENTION_DAYS must be at least 1, got %d", c.RetentionDays))
+	}
+	return errors.Join(errs...)
+}
+
 // LoadMigrate reads the cmd/migrate configuration from the process environment.
 func LoadMigrate() (Migrate, error) {
 	return loadMigrate(nil)

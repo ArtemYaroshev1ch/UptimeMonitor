@@ -250,3 +250,53 @@ func TestLoadMigrateErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadWorker(t *testing.T) {
+	t.Parallel()
+
+	defaults, err := loadWorker(map[string]string{"DATABASE_URL": testDSN})
+	require.NoError(t, err)
+	assert.Equal(t, Worker{
+		Common:        Common{Env: EnvDev, LogLevel: slog.LevelInfo, ShutdownTimeout: 25 * time.Second},
+		DB:            Database{URL: testDSN, MaxConns: 10},
+		OpsAddr:       ":9091",
+		Concurrency:   20,
+		BatchSize:     50,
+		RetentionDays: 30,
+	}, defaults)
+
+	custom, err := loadWorker(map[string]string{
+		"DATABASE_URL":          testDSN,
+		"OPS_ADDR":              "127.0.0.1:19091",
+		"WORKER_CONCURRENCY":    "5",
+		"SCHEDULER_BATCH_SIZE":  "10",
+		"CHECKS_RETENTION_DAYS": "7",
+		"ALLOW_PRIVATE_TARGETS": "true",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "127.0.0.1:19091", custom.OpsAddr)
+	assert.Equal(t, 5, custom.Concurrency)
+	assert.Equal(t, 10, custom.BatchSize)
+	assert.Equal(t, 7, custom.RetentionDays)
+	assert.True(t, custom.AllowPrivateTargets)
+}
+
+func TestLoadWorkerErrors(t *testing.T) {
+	t.Parallel()
+
+	_, err := loadWorker(map[string]string{
+		"DATABASE_URL":          testDSN,
+		"OPS_ADDR":              "9091",
+		"WORKER_CONCURRENCY":    "0",
+		"SCHEDULER_BATCH_SIZE":  "0",
+		"CHECKS_RETENTION_DAYS": "0",
+	})
+
+	require.Error(t, err)
+	for _, want := range []string{"OPS_ADDR", "WORKER_CONCURRENCY", "SCHEDULER_BATCH_SIZE", "CHECKS_RETENTION_DAYS"} {
+		assert.ErrorContains(t, err, want)
+	}
+
+	_, err = loadWorker(map[string]string{})
+	assert.ErrorContains(t, err, "DATABASE_URL")
+}

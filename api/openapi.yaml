@@ -262,6 +262,87 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "500": { $ref: "#/components/responses/Internal" }
 
+  /api/v1/monitors/{id}/checks:
+    parameters:
+      - { $ref: "#/components/parameters/MonitorID" }
+    get:
+      tags: [monitors]
+      summary: Check history of a monitor
+      description: |
+        Checks with `from <= checked_at < to`, newest first. Without
+        from/to: the last 24 hours. Checks older than CHECKS_RETENTION_DAYS
+        (30) are deleted.
+      operationId: listChecks
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: from
+          in: query
+          description: Start of the range, RFC 3339. Default to - 24h.
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          description: End of the range (exclusive), RFC 3339. Default now.
+          schema: { type: string, format: date-time }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Offset" }
+      responses:
+        "200":
+          description: One page of checks.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Check" }
+                  total: { type: integer, description: Checks in the range. }
+                  from: { type: string, format: date-time }
+                  to: { type: string, format: date-time }
+                required: [items, total, from, to]
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  /api/v1/monitors/{id}/stats:
+    parameters:
+      - { $ref: "#/components/parameters/MonitorID" }
+    get:
+      tags: [monitors]
+      summary: Uptime and latency statistics of a monitor
+      description: |
+        Computed by PostgreSQL over the period ending now. Uptime counts all
+        checks; latency figures cover successful checks only. Figures are
+        null when there is nothing to aggregate.
+      operationId: monitorStats
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: period
+          in: query
+          schema: { type: string, enum: [24h, 7d, 30d], default: 24h }
+      responses:
+        "200":
+          description: Statistics.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Stats" }
+              example:
+                period: 7d
+                from: "2026-10-24T12:00:00Z"
+                total_checks: 20160
+                failed_checks: 3
+                uptime_percent: 99.985
+                avg_response_ms: 431.2
+                p95_response_ms: 610
+                p95_ttfb_ms: 140
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/Internal" }
+
 components:
   parameters:
     MonitorID:
@@ -405,6 +486,53 @@ components:
       required: [id, name, url, method, interval_seconds, timeout_seconds, expected_status,
         keyword, follow_redirects, failure_threshold, cert_expiry_warn_days, is_active,
         status, tls_not_after, last_checked_at, created_at, updated_at]
+
+    Check:
+      type: object
+      description: |
+        One check. Timings describe the final request after redirects and are
+        null when the phase did not happen (no DNS for an IP literal, no TLS
+        for http://, nothing after a failed connect).
+      properties:
+        id: { type: integer, format: int64 }
+        checked_at: { type: string, format: date-time }
+        success: { type: boolean }
+        status_code: { type: [integer, "null"] }
+        response_time_ms:
+          type: integer
+          description: Whole check, including redirects and reading up to 1 MiB of body.
+        dns_ms: { type: [integer, "null"] }
+        connect_ms: { type: [integer, "null"] }
+        tls_ms: { type: [integer, "null"] }
+        ttfb_ms:
+          type: [integer, "null"]
+          description: From the request being written to the first response byte.
+        http_proto: { type: [string, "null"], example: HTTP/2.0 }
+        tls_version: { type: [string, "null"], example: TLS1.3 }
+        tls_not_after:
+          type: [string, "null"]
+          format: date-time
+          description: Expiry of the server's leaf certificate.
+        error_kind:
+          type: [string, "null"]
+          enum: [dns, timeout, connection, tls, unexpected_status, keyword_mismatch, blocked_target, unknown, null]
+        error_message: { type: [string, "null"] }
+      required: [id, checked_at, success, status_code, response_time_ms, dns_ms, connect_ms,
+        tls_ms, ttfb_ms, http_proto, tls_version, tls_not_after, error_kind, error_message]
+
+    Stats:
+      type: object
+      properties:
+        period: { type: string, enum: [24h, 7d, 30d] }
+        from: { type: string, format: date-time }
+        total_checks: { type: integer }
+        failed_checks: { type: integer }
+        uptime_percent: { type: [number, "null"] }
+        avg_response_ms: { type: [number, "null"] }
+        p95_response_ms: { type: [number, "null"] }
+        p95_ttfb_ms: { type: [number, "null"] }
+      required: [period, from, total_checks, failed_checks, uptime_percent,
+        avg_response_ms, p95_response_ms, p95_ttfb_ms]
 
     Error:
       type: object

@@ -213,6 +213,10 @@ func (s *Monitors) applyPatch(dst *domain.MonitorSettings, p MonitorPatch, check
 			}
 		}
 	}
+	if dst.Method == domain.MethodHead && dst.Keyword != nil {
+		// A HEAD response has no body, so the keyword could never match.
+		details = append(details, domain.FieldError{Field: "keyword", Issue: "requires method GET"})
+	}
 	urlFailed := slices.ContainsFunc(details, func(d domain.FieldError) bool { return d.Field == "url" })
 	if checkURL && !urlFailed {
 		if err := s.urls.ValidateURL(dst.URL); err != nil {

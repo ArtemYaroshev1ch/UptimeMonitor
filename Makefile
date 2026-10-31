@@ -27,8 +27,8 @@ GOEXE := $(shell $(GO) env GOEXE)
 BIN_DIR   := bin
 TOOLS_DIR := $(BIN_DIR)/tools
 
-# Binaries under cmd/. worker is added in a later phase.
-CMDS := api migrate
+# Binaries under cmd/.
+CMDS := api worker migrate
 
 # Build metadata injected into package main of every binary via -ldflags.
 # Release tags are vX.Y.Z; the version itself is SemVer without the "v".
@@ -68,6 +68,10 @@ help: ## Show this help
 .PHONY: run-api
 run-api: build ## Build and run the API (loads .env if present)
 	@$(LOAD_ENV) ./$(BIN_DIR)/api$(GOEXE)
+
+.PHONY: run-worker
+run-worker: build ## Build and run the worker (loads .env if present)
+	@$(LOAD_ENV) ./$(BIN_DIR)/worker$(GOEXE)
 
 .PHONY: migrate-up
 migrate-up: build ## Apply all pending migrations (loads .env)

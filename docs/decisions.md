@@ -371,3 +371,88 @@ like an unknown or foreign one.
 
 **Alternatives.** Resolving the hostname when saving: slower, and worthless
 against DNS rebinding, which the connect-time check handles anyway.
+
+## 020. Scheduler: claim only what fits in the pool, plan from now()
+
+*2026-10-31, Phase 4*
+
+**Context.** The query from PROMPT.md section 6 claims due monitors with
+`FOR UPDATE SKIP LOCKED` and moves `next_check_at` ahead in the same
+statement. Two details are open: how many to claim and from which time to
+plan the next check.
+
+**Decision.** Each tick (1 s) a worker claims `min(free pool slots,
+SCHEDULER_BATCH_SIZE)` monitors. A claimed monitor starts at once, never
+waits in an in-memory queue where it would be late (and lost if the process
+died). With a full pool the tick skips the query and only refreshes the
+heartbeat. `next_check_at = now() + interval`, not `scheduled_for +
+interval`: after an outage or a backlog each monitor is checked once and
+then returns to its rhythm, instead of firing once per missed interval. The
+CTE returns `scheduled_for` (the old `next_check_at`) for the scheduler-lag
+SLI. A check gets `SHUTDOWN_TIMEOUT` to finish after SIGTERM; its context is
+detached from the shutdown signal (`context.WithoutCancel`) and cancelled
+only when that time is up.
+
+**Alternatives.** A claimed-but-unprocessed state with a lease: recovers
+work from crashed workers sooner, but needs a column, a reaper and more SQL;
+with a claim moving `next_check_at` by one interval, the worst case is one
+missed interval for the monitors a crashed worker was checking.
+
+## 021. Check timings: what exactly is measured
+
+*2026-10-31, Phase 4*
+
+**Context.** `dns_ms/connect_ms/tls_ms/ttfb_ms` must be comparable between
+checks and meaningful with redirects.
+
+**Decision.** Keep-alives are off, so every check opens a new connection.
+DNS is resolved by the checker itself (`Resolver.LookupNetIP`, injectable
+for tests) and timed around the lookup; connect, TLS and first byte come
+from `httptrace`. `ttfb_ms` is from "request written" to "first response
+byte": the server's think time, independent of the network setup before it.
+With redirects, the phase timings describe the **final** request (reset on
+each hop's `GetConn`); `response_time_ms` covers the whole chain including
+reading up to 1 MiB of body. A phase that did not happen is `NULL`, not 0.
+
+## 022. Monitor status and statistics rules
+
+*2026-10-31, Phase 4*
+
+**Decision.** After a check, in the same transaction as the insert:
+success sets `status = up` and `consecutive_failures = 0`; a failure
+increments `consecutive_failures` and sets `down` only once it reaches
+`failure_threshold`, so one blip does not flip a monitor (incidents in
+Phase 5 use the same threshold). `tls_not_after` keeps the last known value
+when a check sees no certificate. Statistics count all checks for uptime,
+but average and p95 latency only over successful checks: a 10 s timeout
+says nothing about how fast the site answers, and would dominate the p95.
+Figures are `null`, not 0, when there is nothing to aggregate.
+
+## 023. Worker pool size and retention batches
+
+*2026-10-31, Phase 4*
+
+**Decision.** The worker's connection pool is at least
+`WORKER_CONCURRENCY + 2` (one per running check to save its result, one for
+claiming, one for retention), whatever `DB_MAX_CONNS` says; a smaller pool
+would make finished checks queue for a connection and inflate the lag.
+Retention deletes `checked_at < now - CHECKS_RETENTION_DAYS` in batches of
+5000 rows per statement, hourly, in every worker: deletes are idempotent,
+and short statements never hold long locks.
+
+## 024. Metrics of the worker come with the registry (Phase 7)
+
+*2026-10-31, Phase 4*
+
+**Context.** CLAUDE.md rule 8 says a new loop or external call is not done
+without its metrics. The registry, collectors and the `/metrics` endpoint
+are Phase 7 (decision 009).
+
+**Decision.** As in decision 009, the scheduler, pool, checker and retention
+metrics (`uptime_checks_total`, `uptime_check_duration_seconds`,
+`uptime_scheduler_lag_seconds`, `uptime_scheduler_due_monitors`,
+`uptime_worker_pool_*`, `uptime_retention_*`) are added in Phase 7. The data
+they need is already there: `scheduled_for` for the lag, `ErrorKind` as a
+closed list for the label, `Scheduler.Heartbeat` for readiness. Until then
+the worker logs each check at debug level and every claim or retention
+error at error level.
