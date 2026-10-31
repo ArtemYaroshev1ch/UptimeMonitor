@@ -343,13 +343,15 @@ func TestMeRejectsExpiredToken(t *testing.T) {
 
 func TestAuthRateLimit(t *testing.T) {
 	t.Parallel()
-	api := newTestAPI(t, fakeDB{}, discardLog())
+	var logs bytes.Buffer
+	api := newTestAPI(t, fakeDB{}, logger.New(&logs, logger.Options{Format: logger.FormatJSON, Level: slog.LevelInfo}))
 
-	// Both endpoints share the budget of 10 requests per minute per IP.
+	// Both endpoints share the budget of 10 requests per minute per IP. The
+	// 11th request goes to login.
 	codes := make([]int, 0, 11)
 	for i := range 11 {
 		path := "/api/v1/auth/login"
-		if i%2 == 0 {
+		if i%2 == 1 {
 			path = "/api/v1/auth/register"
 		}
 		codes = append(codes, api.do(t, http.MethodPost, path, `{}`, "").Code)
@@ -357,6 +359,9 @@ func TestAuthRateLimit(t *testing.T) {
 
 	assert.NotContains(t, codes[:10], http.StatusTooManyRequests)
 	assert.Equal(t, http.StatusTooManyRequests, codes[10])
+	// The rejected request is logged under its full route template.
+	assert.Contains(t, logs.String(), `"status":429`)
+	assert.Contains(t, logs.String(), `"route":"/api/v1/auth/login"`)
 
 	// /me is not rate-limited.
 	rec := api.do(t, http.MethodGet, "/api/v1/me", "", "")

@@ -54,12 +54,14 @@ func NewRouter(d Deps) http.Handler {
 
 	auth := handler.NewAuth(d.Auth, d.Log)
 	r.Route("/api/v1", func(r chi.Router) {
-		r.Route("/auth", func(r chi.Router) {
-			// Limits password guessing and mass registration.
-			r.Use(middleware.RateLimit(d.AuthLimiter, middleware.ClientIP(d.TrustProxyHeaders)))
-			r.Post("/register", auth.Register)
-			r.Post("/login", auth.Login)
-		})
+		// Limits password guessing and mass registration; both routes share
+		// one budget per IP. Attached with With rather than in a Route
+		// sub-router: With runs after chi has matched the full route, so a
+		// rejected request is still logged under "/api/v1/auth/login", not
+		// the sub-router's "/api/v1/auth/*".
+		authLimit := middleware.RateLimit(d.AuthLimiter, middleware.ClientIP(d.TrustProxyHeaders))
+		r.With(authLimit).Post("/auth/register", auth.Register)
+		r.With(authLimit).Post("/auth/login", auth.Login)
 
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Authenticate(d.Tokens, d.Log))
