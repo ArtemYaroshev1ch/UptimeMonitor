@@ -19,6 +19,8 @@ tags:
     description: Probes and build information.
   - name: auth
     description: Registration, login and the current user.
+  - name: monitors
+    description: URLs checked on your behalf. You only ever see your own.
 
 paths:
   /healthz:
@@ -143,7 +145,141 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "500": { $ref: "#/components/responses/Internal" }
 
+  /api/v1/monitors:
+    post:
+      tags: [monitors]
+      summary: Create a monitor
+      description: |
+        Absent fields take their defaults. Fails with 409 when the user
+        already has MAX_MONITORS_PER_USER monitors.
+      operationId: createMonitor
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MonitorInput" }
+            example: { name: Example, url: "https://example.com", interval_seconds: 60 }
+      responses:
+        "201":
+          description: Created.
+          headers:
+            Location:
+              description: Path of the new monitor.
+              schema: { type: string, example: /api/v1/monitors/0b8f3c2e-5a1d-4c8e-9f0a-2d6b7e1c4a9f }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Monitor" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/LimitReached" }
+        "500": { $ref: "#/components/responses/Internal" }
+    get:
+      tags: [monitors]
+      summary: List your monitors
+      description: Newest first.
+      operationId: listMonitors
+      security:
+        - bearerAuth: []
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Offset" }
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Monitor" }
+                  total:
+                    type: integer
+                    description: Number of all your monitors, not just this page.
+                required: [items, total]
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  /api/v1/monitors/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/MonitorID" }
+    get:
+      tags: [monitors]
+      summary: Get one of your monitors
+      operationId: getMonitor
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The monitor.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Monitor" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/Internal" }
+    patch:
+      tags: [monitors]
+      summary: Update a monitor partially
+      description: |
+        Only the fields present in the body change. `null` clears the
+        optional fields `expected_status` and `keyword`; for other fields it
+        is a validation error. Set `is_active` to pause or resume. A resumed
+        monitor or one with a new URL is checked as soon as possible.
+      operationId: updateMonitor
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MonitorInput" }
+            example: { is_active: false, keyword: null }
+      responses:
+        "200":
+          description: The updated monitor.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Monitor" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/Internal" }
+    delete:
+      tags: [monitors]
+      summary: Delete a monitor
+      operationId: deleteMonitor
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Deleted.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/Internal" }
+
 components:
+  parameters:
+    MonitorID:
+      name: id
+      in: path
+      required: true
+      description: |
+        Monitor ID. Unknown, malformed and other users' IDs all answer 404.
+      schema: { type: string, format: uuid }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    Offset:
+      name: offset
+      in: query
+      schema: { type: integer, minimum: 0, default: 0 }
+
   securitySchemes:
     bearerAuth:
       type: http
@@ -194,6 +330,82 @@ components:
         expires_at: { type: string, format: date-time }
       required: [access_token, token_type, expires_at]
 
+    MonitorInput:
+      type: object
+      additionalProperties: false
+      description: |
+        Body of create and update. On create, `name` and `url` are required
+        and other absent fields take the defaults shown.
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100, description: Trimmed. }
+        url:
+          type: string
+          format: uri
+          maxLength: 2048
+          description: |
+            http or https, no user:password, and not an internal address
+            (loopback, private, link-local, CGNAT, localhost, numeric hosts)
+            unless the server runs with ALLOW_PRIVATE_TARGETS=true.
+        method: { type: string, enum: [GET, HEAD], default: GET, description: Case-insensitive. }
+        interval_seconds: { type: integer, minimum: 30, maximum: 86400, default: 60 }
+        timeout_seconds: { type: integer, minimum: 1, maximum: 30, default: 10 }
+        expected_status:
+          type: [integer, "null"]
+          minimum: 100
+          maximum: 599
+          default: null
+          description: null accepts any 2xx.
+        keyword:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 1000
+          default: null
+          description: Substring the first 1 MiB of the body must contain; null disables the check.
+        follow_redirects: { type: boolean, default: true, description: At most 5 redirects. }
+        failure_threshold:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 3
+          description: Failed checks in a row before an incident opens.
+        cert_expiry_warn_days:
+          type: integer
+          minimum: 1
+          maximum: 90
+          default: 14
+          description: Warn this many days before the TLS certificate expires.
+        is_active: { type: boolean, default: true, description: false pauses the monitor. }
+
+    Monitor:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        url: { type: string, format: uri }
+        method: { type: string, enum: [GET, HEAD] }
+        interval_seconds: { type: integer }
+        timeout_seconds: { type: integer }
+        expected_status: { type: [integer, "null"] }
+        keyword: { type: [string, "null"] }
+        follow_redirects: { type: boolean }
+        failure_threshold: { type: integer }
+        cert_expiry_warn_days: { type: integer }
+        is_active: { type: boolean }
+        status:
+          type: string
+          enum: [unknown, up, down]
+          description: unknown until the first check.
+        tls_not_after:
+          type: [string, "null"]
+          format: date-time
+          description: Expiry of the last seen TLS certificate.
+        last_checked_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+      required: [id, name, url, method, interval_seconds, timeout_seconds, expected_status,
+        keyword, follow_redirects, failure_threshold, cert_expiry_warn_days, is_active,
+        status, tls_not_after, last_checked_at, created_at, updated_at]
+
     Error:
       type: object
       properties:
@@ -241,6 +453,18 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
           example: { error: { code: unauthorized, message: Authentication required } }
+    NotFound:
+      description: No such monitor of yours.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: { code: not_found, message: Resource not found } }
+    LimitReached:
+      description: You already have the maximum number of monitors.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: { code: conflict, message: Limit reached } }
     Conflict:
       description: The email is already registered.
       content:
