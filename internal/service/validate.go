@@ -50,6 +50,14 @@ func (iv inputValidator) check(s any) error {
 	return verr
 }
 
+// unit names what min/max count: characters for strings, nothing for numbers.
+func unit(fe validator.FieldError) string {
+	if fe.Kind() == reflect.String {
+		return " characters"
+	}
+	return ""
+}
+
 // issue renders a failed rule as a message for the client.
 func issue(fe validator.FieldError) string {
 	switch fe.Tag() {
@@ -58,9 +66,11 @@ func issue(fe validator.FieldError) string {
 	case "email":
 		return "must be a valid email address"
 	case "min":
-		return "must be at least " + fe.Param() + " characters"
+		return "must be at least " + fe.Param() + unit(fe)
 	case "max":
-		return "must be at most " + fe.Param() + " characters"
+		return "must be at most " + fe.Param() + unit(fe)
+	case "oneof":
+		return "must be one of: " + strings.Join(strings.Fields(fe.Param()), ", ")
 	default:
 		return "is invalid (" + fe.Tag() + ")"
 	}
