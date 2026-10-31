@@ -83,13 +83,13 @@ func TestCreateMonitorAllFields(t *testing.T) {
 	env := newMonitorsEnv(t)
 
 	m := env.create(t, `{
-		"name": "API", "url": "http://example.com", "method": "head",
+		"name": "API", "url": "http://example.com", "method": "get",
 		"interval_seconds": 300, "timeout_seconds": 5, "expected_status": 204,
 		"keyword": "ok", "follow_redirects": false, "failure_threshold": 1,
 		"cert_expiry_warn_days": 30, "is_active": false}`)
 
 	assert.Equal(t, domain.MonitorSettings{
-		Name: "API", URL: "http://example.com", Method: "HEAD",
+		Name: "API", URL: "http://example.com", Method: "GET",
 		IntervalSeconds: 300, TimeoutSeconds: 5, ExpectedStatus: ptr(204),
 		Keyword: ptr("ok"), FollowRedirects: false, FailureThreshold: 1,
 		CertExpiryWarnDays: 30, IsActive: false,
@@ -164,6 +164,11 @@ func TestCreateMonitorValidation(t *testing.T) {
 			name: "empty keyword",
 			body: `{` + valid + `,"keyword":""}`,
 			want: []domain.FieldError{{Field: "keyword", Issue: "must be at least 1 characters"}},
+		},
+		{
+			name: "keyword with HEAD",
+			body: `{` + valid + `,"method":"HEAD","keyword":"ok"}`,
+			want: []domain.FieldError{{Field: "keyword", Issue: "requires method GET"}},
 		},
 		{
 			name: "threshold",
