@@ -54,7 +54,9 @@ func TestMigrationsFromScratch(t *testing.T) {
 		applied, err := migrator.Up(ctx)
 		require.NoError(t, err, "pass %d: up", pass)
 		assert.Len(t, applied, len(files), "pass %d: every migration is applied", pass)
-		assert.True(t, tableExists(t, db, "users"), "pass %d", pass)
+		for _, table := range []string{"users", "monitors"} {
+			assert.True(t, tableExists(t, db, table), "pass %d: %s", pass, table)
+		}
 
 		pending, err := migrator.HasPending(ctx)
 		require.NoError(t, err)
@@ -63,7 +65,9 @@ func TestMigrationsFromScratch(t *testing.T) {
 		rolledBack, err := migrator.DownTo(ctx, 0)
 		require.NoError(t, err, "pass %d: down", pass)
 		assert.Len(t, rolledBack, len(files), "pass %d: every migration is rolled back", pass)
-		assert.False(t, tableExists(t, db, "users"), "pass %d", pass)
+		for _, table := range []string{"users", "monitors"} {
+			assert.False(t, tableExists(t, db, table), "pass %d: %s", pass, table)
+		}
 	}
 }
 
