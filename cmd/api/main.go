@@ -14,13 +14,18 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/artemyaroshev1ch/uptime-monitor/internal/auth"
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/config"
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/httpapi"
+	"github.com/artemyaroshev1ch/uptime-monitor/internal/httpapi/middleware"
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/observability"
+	"github.com/artemyaroshev1ch/uptime-monitor/internal/platform/clock"
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/platform/healthcheck"
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/platform/httpserver"
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/platform/logger"
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/platform/postgres"
+	repository "github.com/artemyaroshev1ch/uptime-monitor/internal/repository/postgres"
+	svc "github.com/artemyaroshev1ch/uptime-monitor/internal/service"
 )
 
 // Build metadata, set by the linker (see LDFLAGS in the Makefile):
@@ -36,6 +41,9 @@ const service = "api"
 
 // healthcheckTimeout is how long -healthcheck waits for /healthz.
 const healthcheckTimeout = 3 * time.Second
+
+// authRateLimit is how many /api/v1/auth/* requests one IP may make per minute.
+const authRateLimit = 10
 
 func main() {
 	info := observability.NewBuildInfo(version, commit, builtAt)
@@ -125,7 +133,23 @@ func serve(ctx context.Context, cfg config.API, info observability.BuildInfo, st
 	// finished with their connections by then.
 	defer pool.Close()
 
-	router := httpapi.NewRouter(httpapi.Deps{BuildInfo: info, DB: pool, Log: log})
+	clk := clock.System{}
+	tokens := auth.NewTokens([]byte(cfg.Auth.JWTSecret), cfg.Auth.AccessTokenTTL, clk)
+	authSvc, err := svc.NewAuth(repository.NewUsers(pool), auth.NewPasswords(auth.DefaultBcryptCost), tokens)
+	if err != nil {
+		return err
+	}
+
+	router := httpapi.NewRouter(httpapi.Deps{
+		BuildInfo:         info,
+		DB:                pool,
+		Log:               log,
+		Clock:             clk,
+		Auth:              authSvc,
+		Tokens:            tokens,
+		AuthLimiter:       middleware.NewRateLimiter(authRateLimit, time.Minute, clk),
+		TrustProxyHeaders: cfg.TrustProxyHeaders,
+	})
 	if err := httpserver.New("public", router, log, cfg.ShutdownTimeout).Serve(ctx, ln); err != nil {
 		return err
 	}

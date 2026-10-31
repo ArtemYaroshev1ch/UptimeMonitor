@@ -38,6 +38,7 @@ func setEnv(t *testing.T, kv map[string]string) {
 		// Nothing listens on port 1. The pool connects lazily, so the server
 		// starts anyway; only /readyz would notice.
 		"DATABASE_URL": "postgres://uptime:uptime@127.0.0.1:1/uptime",
+		"JWT_SECRET":   "0123456789abcdef0123456789abcdef",
 	}
 	for k, v := range defaults {
 		t.Setenv(k, v)
