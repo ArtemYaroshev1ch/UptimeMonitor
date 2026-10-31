@@ -8,15 +8,18 @@ Self-hosted uptime monitoring for websites with HTTP/HTTPS diagnostics,
 incidents and notifications, built to be operated: metrics, health probes,
 structured logs and graceful shutdown.
 
-> **Status: early development (Phase 2, authentication).** The API process
-> with health probes, PostgreSQL with migrations, user registration and JWT
-> login exist so far. Items marked *planned* are not implemented yet; see
-> [Roadmap](#roadmap).
+> **Status: early development (Phase 3, monitors).** The API with health
+> probes, registration, JWT login and monitor management exists so far;
+> monitors are stored but not checked yet (Phase 4). Items marked *planned*
+> are not implemented yet; see [Roadmap](#roadmap).
 
 ## Features
 
 - Registration and login with email and password (bcrypt); login returns a
   JWT access token. Auth endpoints are rate-limited per client IP.
+- Monitors: create, list (paginated), read, partially update (including
+  pause/resume) and delete. URLs are validated against SSRF targets; each user
+  sees only their own monitors and has a configurable limit.
 - One error format for every endpoint, with per-field details for invalid
   input. Every response carries an `X-Request-ID` that also appears in logs.
 - Liveness `GET /healthz`, readiness `GET /readyz` (checks PostgreSQL) and
@@ -25,7 +28,7 @@ structured logs and graceful shutdown.
 - JSON logs in production, text logs in development.
 - Graceful shutdown on `SIGTERM`/Ctrl+C.
 - `-healthcheck` flag for container health checks without curl.
-- *Planned:* HTTP/HTTPS monitors with per-phase timings
+- *Planned:* HTTP/HTTPS checks with per-phase timings
   (DNS, connect, TLS, TTFB), incidents, Telegram and webhook notifications,
   TLS certificate expiry warnings, Prometheus metrics.
 
@@ -60,6 +63,17 @@ curl -X POST http://localhost:8080/api/v1/auth/login \
 # {"access_token":"eyJ...","token_type":"Bearer","expires_at":"..."}
 curl http://localhost:8080/api/v1/me -H "Authorization: Bearer eyJ..."
 # {"id":"...","email":"alice@example.com","created_at":"..."}
+
+TOKEN=eyJ...
+curl -X POST http://localhost:8080/api/v1/monitors -H "Authorization: Bearer $TOKEN" \
+  -d '{"name":"Example","url":"https://example.com","interval_seconds":60}'
+# {"id":"...","name":"Example","url":"https://example.com","method":"GET",
+#  "interval_seconds":60,"timeout_seconds":10,"is_active":true,"status":"unknown",...}
+curl "http://localhost:8080/api/v1/monitors?limit=50&offset=0" -H "Authorization: Bearer $TOKEN"
+# {"items":[...],"total":1}
+curl -X PATCH http://localhost:8080/api/v1/monitors/<id> -H "Authorization: Bearer $TOKEN" \
+  -d '{"is_active":false,"keyword":null}'   # pause; null clears an optional field
+curl -X DELETE http://localhost:8080/api/v1/monitors/<id> -H "Authorization: Bearer $TOKEN"
 ```
 
 Errors look the same everywhere:
@@ -80,17 +94,19 @@ The API is described in [api/openapi.yaml](api/openapi.yaml).
 All configuration comes from environment variables. `make run-api` also reads
 `.env` if it exists.
 
-| Variable           | Description                                      | Default |
-|--------------------|--------------------------------------------------|---------|
-| `APP_ENV`          | `dev` (text logs) or `prod` (JSON logs)          | `dev`   |
-| `LOG_LEVEL`        | `debug`, `info`, `warn` or `error`               | `info`  |
-| `HTTP_ADDR`        | public REST API listen address                   | `:8080` |
-| `DATABASE_URL`     | PostgreSQL URL (**required**, contains password) | —       |
-| `DB_MAX_CONNS`     | connection pool size of one `api` process        | `10`    |
-| `SHUTDOWN_TIMEOUT` | time for in-flight requests to finish on SIGTERM | `25s`   |
-| `JWT_SECRET`       | token signing key, ≥ 32 bytes (**required**, secret) | —   |
-| `ACCESS_TOKEN_TTL` | access token lifetime                            | `12h`   |
-| `TRUST_PROXY_HEADERS` | rate-limit by `X-Forwarded-For` (behind a proxy only) | `false` |
+| Variable                | Description                                             | Default |
+|-------------------------|---------------------------------------------------------|---------|
+| `APP_ENV`               | `dev` (text logs) or `prod` (JSON logs)                 | `dev`   |
+| `LOG_LEVEL`             | `debug`, `info`, `warn` or `error`                      | `info`  |
+| `HTTP_ADDR`             | public REST API listen address                          | `:8080` |
+| `DATABASE_URL`          | PostgreSQL URL (**required**, contains password)        | —       |
+| `DB_MAX_CONNS`          | connection pool size of one `api` process               | `10`    |
+| `SHUTDOWN_TIMEOUT`      | time for in-flight requests to finish on SIGTERM        | `25s`   |
+| `JWT_SECRET`            | token signing key, ≥ 32 bytes (**required**, secret)    | —       |
+| `ACCESS_TOKEN_TTL`      | access token lifetime                                   | `12h`   |
+| `TRUST_PROXY_HEADERS`   | rate-limit by `X-Forwarded-For` (behind a proxy only)   | `false` |
+| `MAX_MONITORS_PER_USER` | monitors one user may have                              | `20`    |
+| `ALLOW_PRIVATE_TARGETS` | allow private/loopback monitor URLs (**dev only**)      | `false` |
 
 Invalid values stop the process at startup with an error that lists every
 problem.
@@ -158,8 +174,27 @@ after a rollback (expand/contract):
   instance. Behind a reverse proxy set `TRUST_PROXY_HEADERS=true`, otherwise
   all clients share the proxy's address.
 - Request bodies are limited to 1 MiB; unknown JSON fields are rejected.
-- *Planned:* SSRF protection for monitored URLs and the
-  `ALLOW_PRIVATE_TARGETS` development switch.
+- Data isolation: every monitor query filters by the owner. Another user's
+  monitor answers 404, exactly like a missing one.
+
+### SSRF
+
+The service fetches URLs chosen by its users, so without protection anyone
+could make it request `http://169.254.169.254/` (cloud credentials),
+`http://localhost:9090/metrics` or hosts in the internal network.
+
+- **When a monitor is saved** the URL must be `http` or `https`, must not
+  contain `user:password@`, and must not point to loopback, private
+  (RFC 1918, IPv6 ULA), link-local (including `169.254.169.254`), CGNAT,
+  multicast, unspecified or reserved addresses, `localhost`, or numeric host
+  forms such as `2130706433` or `0x7f.1`.
+- This check is syntactic: a hostname can resolve to an internal address,
+  now or later (DNS rebinding). *Planned (Phase 4):* the checker verifies
+  every resolved address again at connect time and on every redirect.
+- `ALLOW_PRIVATE_TARGETS=true` disables the address rules (not the scheme and
+  credential rules) so you can monitor local services during development.
+  **Never enable it in production.** The API logs a warning at startup when it
+  is on.
 
 ## Development
 
@@ -213,7 +248,7 @@ Deployment, monitoring stack, SLOs, alerts and runbooks live in the
 - [x] Phase 0: skeleton, config, logging, `/healthz`, `/version`, CI
 - [x] Phase 1: PostgreSQL, migrations, `/readyz`, integration tests
 - [x] Phase 2: users and authentication
-- [ ] Phase 3: monitors CRUD
+- [x] Phase 3: monitors CRUD
 - [ ] Phase 4: checks, scheduler, statistics
 - [ ] Phase 5: incidents
 - [ ] Phase 6: notifications and certificate warnings
