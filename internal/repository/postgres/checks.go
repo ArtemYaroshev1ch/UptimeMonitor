@@ -8,13 +8,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/domain"
 )
-
-// foreignKeyViolation is the PostgreSQL error code for a missing referenced row.
-const foreignKeyViolation = "23503"
 
 // Checks stores check results and claims monitors that are due.
 type Checks struct {
@@ -73,16 +69,39 @@ func (r *Checks) ClaimDue(ctx context.Context, limit int) ([]domain.CheckTarget,
 	return targets, nil
 }
 
-// SaveResult stores a check result and updates the monitor's state in one
-// transaction: either both happen or neither. A monitor deleted while it was
-// being checked returns domain.ErrNotFound.
+// SaveResult stores a check result, applies it to the monitor's health
+// (domain.Evaluate) and opens or resolves an incident, all in one
+// transaction: the check, the monitor state and the incident never disagree.
+// A monitor deleted while it was being checked returns domain.ErrNotFound.
 //
-// Status: up after a success; down once consecutive_failures reaches
-// failure_threshold; unchanged in between, so one failed check does not flip
-// a monitor to down.
-func (r *Checks) SaveResult(ctx context.Context, monitorID uuid.UUID, res domain.CheckResult) error {
+// The monitor row is locked first (FOR UPDATE). Two results of the same
+// monitor (possible when a slow check overlaps the next one, or with several
+// workers) are therefore evaluated one after the other, each seeing the
+// state the previous one left: the second failure at the threshold sees the
+// incident the first one opened. The partial unique index on open incidents
+// is the last line of defense (ON CONFLICT DO NOTHING).
+func (r *Checks) SaveResult(ctx context.Context, monitorID uuid.UUID, res domain.CheckResult) (domain.IncidentChange, error) {
+	var change domain.IncidentChange
 	err := pgx.BeginFunc(ctx, r.db, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `
+		var (
+			h         domain.Health
+			threshold int
+		)
+		err := tx.QueryRow(ctx, `
+			SELECT status, consecutive_failures, failure_threshold,
+			       EXISTS (SELECT 1 FROM incidents WHERE monitor_id = m.id AND resolved_at IS NULL)
+			FROM monitors m
+			WHERE id = $1
+			FOR UPDATE`,
+			monitorID).Scan(&h.Status, &h.ConsecutiveFailures, &threshold, &h.IncidentOpen)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("monitor deleted: %w", domain.ErrNotFound)
+			}
+			return fmt.Errorf("lock monitor: %w", err)
+		}
+
+		_, err = tx.Exec(ctx, `
 			INSERT INTO checks (monitor_id, checked_at, success, status_code, response_time_ms,
 				dns_ms, connect_ms, tls_ms, ttfb_ms, http_proto, tls_version, tls_not_after,
 				error_kind, error_message)
@@ -92,34 +111,79 @@ func (r *Checks) SaveResult(ctx context.Context, monitorID uuid.UUID, res domain
 			nullString(res.TLSVersion), res.TLSNotAfter, nullString(string(res.ErrorKind)),
 			nullString(res.ErrorMessage))
 		if err != nil {
-			if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == foreignKeyViolation {
-				return fmt.Errorf("monitor deleted: %w", domain.ErrNotFound)
-			}
 			return fmt.Errorf("insert check: %w", err)
 		}
 
-		// In SET, column names refer to the values before the update.
+		tr := domain.Evaluate(h, res.Success, threshold)
+
 		_, err = tx.Exec(ctx, `
 			UPDATE monitors SET
 				last_checked_at = $2,
 				tls_not_after = COALESCE($3, tls_not_after),
-				consecutive_failures = CASE WHEN $4 THEN 0 ELSE consecutive_failures + 1 END,
-				status = CASE
-					WHEN $4 THEN 'up'
-					WHEN consecutive_failures + 1 >= failure_threshold THEN 'down'
-					ELSE status
-				END
+				consecutive_failures = $4,
+				status = $5
 			WHERE id = $1`,
-			monitorID, res.CheckedAt, res.TLSNotAfter, res.Success)
+			monitorID, res.CheckedAt, res.TLSNotAfter, tr.Next.ConsecutiveFailures, tr.Next.Status)
 		if err != nil {
 			return fmt.Errorf("update monitor state: %w", err)
 		}
-		return nil
+
+		switch {
+		case tr.OpenIncident:
+			change.Opened, err = openIncident(ctx, tx, monitorID, res)
+		case tr.ResolveIncident:
+			change.Resolved, err = resolveIncident(ctx, tx, monitorID, res.CheckedAt)
+		}
+		return err
 	})
 	if err != nil {
-		return fmt.Errorf("save check result: %w", err)
+		return domain.IncidentChange{}, fmt.Errorf("save check result: %w", err)
 	}
-	return nil
+	return change, nil
+}
+
+// openIncident opens an incident that started at the first failed check of
+// the current streak: the oldest failure after the last success. It returns
+// nil if an incident is already open (the unique index refused the insert).
+func openIncident(ctx context.Context, tx pgx.Tx, monitorID uuid.UUID, res domain.CheckResult) (*domain.Incident, error) {
+	inc, err := scanIncident(tx.QueryRow(ctx, `
+		WITH streak AS (
+			SELECT min(checked_at) AS started_at
+			FROM checks
+			WHERE monitor_id = $1 AND NOT success
+			  AND checked_at > COALESCE(
+			      (SELECT max(checked_at) FROM checks WHERE monitor_id = $1 AND success),
+			      '-infinity')
+		)
+		INSERT INTO incidents AS i (monitor_id, started_at, cause_kind)
+		SELECT $1, COALESCE(streak.started_at, $2), $3 FROM streak
+		ON CONFLICT (monitor_id) WHERE resolved_at IS NULL DO NOTHING
+		RETURNING `+incidentColumns,
+		monitorID, res.CheckedAt, nullString(string(res.ErrorKind))))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("open incident: %w", err)
+	}
+	return &inc, nil
+}
+
+// resolveIncident closes the monitor's open incident at the time of the
+// successful check (never before it started).
+func resolveIncident(ctx context.Context, tx pgx.Tx, monitorID uuid.UUID, at time.Time) (*domain.Incident, error) {
+	inc, err := scanIncident(tx.QueryRow(ctx, `
+		UPDATE incidents AS i SET resolved_at = GREATEST(started_at, $2)
+		WHERE monitor_id = $1 AND resolved_at IS NULL
+		RETURNING `+incidentColumns,
+		monitorID, at))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("resolve incident: %w", err)
+	}
+	return &inc, nil
 }
 
 const checkColumns = `c.id, c.monitor_id, c.checked_at, c.success, c.status_code, c.response_time_ms,

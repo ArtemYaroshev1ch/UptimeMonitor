@@ -8,9 +8,9 @@ Self-hosted uptime monitoring for websites with HTTP/HTTPS diagnostics,
 incidents and notifications, built to be operated: metrics, health probes,
 structured logs and graceful shutdown.
 
-> **Status: early development (Phase 4, checks).** Users, monitors, scheduled
-> HTTP/HTTPS checks with phase timings, history and statistics work.
-> Incidents, notifications and metrics come next. Items marked *planned* are
+> **Status: early development (Phase 5, incidents).** Users, monitors, scheduled
+> HTTP/HTTPS checks with phase timings, history, statistics and incidents
+> work. Notifications and metrics come next. Items marked *planned* are
 > not implemented yet; see [Roadmap](#roadmap).
 
 ## Features
@@ -30,6 +30,10 @@ structured logs and graceful shutdown.
   `CHECKS_RETENTION_DAYS`.
 - Several workers can run side by side: monitors are claimed with
   `FOR UPDATE SKIP LOCKED`, so no monitor is checked twice.
+- Incidents: `failure_threshold` failed checks in a row open one, the first
+  successful check resolves it. Never more than one open incident per
+  monitor, even with concurrent results. The start time is the first failure
+  of the streak, so the duration is the real downtime.
 - One error format for every endpoint, with per-field details for invalid
   input. Every response carries an `X-Request-ID` that also appears in logs.
 - Liveness `GET /healthz`, readiness `GET /readyz` (checks PostgreSQL) and
@@ -38,8 +42,8 @@ structured logs and graceful shutdown.
 - JSON logs in production, text logs in development.
 - Graceful shutdown on `SIGTERM`/Ctrl+C.
 - `-healthcheck` flag for container health checks without curl.
-- *Planned:* incidents, Telegram and webhook notifications, TLS certificate
-  expiry warnings, Prometheus metrics.
+- *Planned:* Telegram and webhook notifications, TLS certificate expiry
+  warnings, Prometheus metrics.
 
 ## Quick start
 
@@ -90,6 +94,9 @@ curl "http://localhost:8080/api/v1/monitors/<id>/checks?limit=1" -H "Authorizati
 curl "http://localhost:8080/api/v1/monitors/<id>/stats?period=7d" -H "Authorization: Bearer $TOKEN"
 # {"period":"7d","total_checks":20160,"failed_checks":3,"uptime_percent":99.985,
 #  "avg_response_ms":431.2,"p95_response_ms":610,"p95_ttfb_ms":140,...}
+curl "http://localhost:8080/api/v1/incidents?open=true" -H "Authorization: Bearer $TOKEN"
+# {"items":[{"id":"...","monitor_id":"...","monitor_name":"Example",
+#   "started_at":"...","resolved_at":null,"cause_kind":"timeout","duration_seconds":null}],"total":1}
 curl -X DELETE http://localhost:8080/api/v1/monitors/<id> -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -157,7 +164,9 @@ problem.
   `service` and `version`; records of a request also carry `request_id`
   (returned to the client as `X-Request-ID`) and, once authenticated,
   `user_id`. Each request gets one `http request` access-log record; probe
-  requests are logged at debug level.
+  requests are logged at debug level. The worker logs `incident opened`
+  (warn) and `incident resolved` (info) with `monitor_id`, `incident_id`,
+  `cause_kind` and `duration_seconds`; every check at debug level.
 - **Shutdown:** on `SIGTERM` the API stops accepting connections and waits up
   to `SHUTDOWN_TIMEOUT` for in-flight requests. The worker stops claiming
   monitors and waits up to `SHUTDOWN_TIMEOUT` for running checks to finish
@@ -288,7 +297,7 @@ Deployment, monitoring stack, SLOs, alerts and runbooks live in the
 - [x] Phase 2: users and authentication
 - [x] Phase 3: monitors CRUD
 - [x] Phase 4: checks, scheduler, statistics
-- [ ] Phase 5: incidents
+- [x] Phase 5: incidents
 - [ ] Phase 6: notifications and certificate warnings
 - [ ] Phase 7: observability
 - [ ] Phase 8: Docker

@@ -36,12 +36,13 @@ const testMonitorLimit = 3
 // testAPI is the full router with real services, auth and middleware; only
 // storage is in memory.
 type testAPI struct {
-	router   http.Handler
-	clock    *clock.Fake
-	tokens   *auth.Tokens
-	auth     *service.Auth
-	monitors *memory.Monitors
-	checks   *memory.Checks
+	router    http.Handler
+	clock     *clock.Fake
+	tokens    *auth.Tokens
+	auth      *service.Auth
+	monitors  *memory.Monitors
+	checks    *memory.Checks
+	incidents *memory.Incidents
 }
 
 func newTestAPI(t *testing.T, db fakeDB, log *slog.Logger) testAPI {
@@ -52,6 +53,7 @@ func newTestAPI(t *testing.T, db fakeDB, log *slog.Logger) testAPI {
 	require.NoError(t, err)
 	monitors := memory.NewMonitors(clk.Now)
 	checks := memory.NewChecks(monitors)
+	incidents := memory.NewIncidents(monitors)
 
 	router := NewRouter(Deps{
 		BuildInfo: observability.BuildInfo{
@@ -65,10 +67,11 @@ func newTestAPI(t *testing.T, db fakeDB, log *slog.Logger) testAPI {
 		Auth:        authSvc,
 		Monitors:    service.NewMonitors(monitors, checker.NewTargetPolicy(false), clk, testMonitorLimit),
 		Checks:      service.NewChecks(monitors, checks, clk),
+		Incidents:   service.NewIncidents(incidents),
 		Tokens:      tokens,
 		AuthLimiter: middleware.NewRateLimiter(10, time.Minute, clk),
 	})
-	return testAPI{router: router, clock: clk, tokens: tokens, auth: authSvc, monitors: monitors, checks: checks}
+	return testAPI{router: router, clock: clk, tokens: tokens, auth: authSvc, monitors: monitors, checks: checks, incidents: incidents}
 }
 
 // userToken registers a user through the service (bypassing the auth rate

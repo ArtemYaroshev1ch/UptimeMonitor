@@ -16,6 +16,7 @@ import (
 
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/domain"
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/platform/clock"
+	"github.com/artemyaroshev1ch/uptime-monitor/internal/platform/logger"
 )
 
 // fakeStore hands out queued targets (or an endless supply) and records
@@ -26,6 +27,7 @@ type fakeStore struct {
 	endless  bool
 	claimErr error
 	saveErr  error
+	change   domain.IncidentChange
 	limits   []int
 	saved    map[uuid.UUID]domain.CheckResult
 }
@@ -54,14 +56,14 @@ func (f *fakeStore) ClaimDue(_ context.Context, limit int) ([]domain.CheckTarget
 	return out, nil
 }
 
-func (f *fakeStore) SaveResult(_ context.Context, id uuid.UUID, res domain.CheckResult) error {
+func (f *fakeStore) SaveResult(_ context.Context, id uuid.UUID, res domain.CheckResult) (domain.IncidentChange, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.saveErr != nil {
-		return f.saveErr
+		return domain.IncidentChange{}, f.saveErr
 	}
 	f.saved[id] = res
-	return nil
+	return f.change, nil
 }
 
 func (f *fakeStore) savedCount() int {
@@ -260,4 +262,61 @@ func TestHeartbeatUsesClock(t *testing.T) {
 	s.beat()
 
 	assert.True(t, now.Equal(s.Heartbeat()))
+}
+
+func TestSchedulerLogsIncidents(t *testing.T) {
+	t.Parallel()
+	started := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	resolved := started.Add(90 * time.Second)
+	incident := domain.Incident{ID: uuid.New(), StartedAt: started, CauseKind: domain.ErrorTimeout}
+
+	for _, tt := range []struct {
+		name   string
+		change domain.IncidentChange
+		want   []string
+	}{
+		{name: "opened", change: domain.IncidentChange{Opened: &incident},
+			want: []string{"level=WARN", `msg="incident opened"`, "incident_id=" + incident.ID.String(), "cause_kind=timeout"}},
+		{name: "resolved", change: domain.IncidentChange{Resolved: &domain.Incident{ID: incident.ID, StartedAt: started, ResolvedAt: &resolved}},
+			want: []string{"level=INFO", `msg="incident resolved"`, "duration_seconds=90"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			target := domain.CheckTarget{MonitorID: uuid.New()}
+			store := newFakeStore(target)
+			store.change = tt.change
+			var logs syncBuffer
+			// The project logger adds the context attributes (monitor_id).
+			log := logger.New(&logs, logger.Options{Format: logger.FormatText, Level: slog.LevelInfo})
+			s := New(store, &fakeChecker{}, log, clock.System{}, testConfig())
+
+			stop := start(t, s)
+			require.Eventually(t, func() bool { return store.savedCount() == 1 }, 5*time.Second, time.Millisecond)
+			stop()
+
+			for _, w := range tt.want {
+				assert.Contains(t, logs.String(), w)
+			}
+			assert.Contains(t, logs.String(), "monitor_id="+target.MonitorID.String())
+		})
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe for the concurrent writes of a logger
+// shared by goroutines.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

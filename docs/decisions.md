@@ -456,3 +456,45 @@ they need is already there: `scheduled_for` for the lag, `ErrorKind` as a
 closed list for the label, `Scheduler.Heartbeat` for readiness. Until then
 the worker logs each check at debug level and every claim or retention
 error at error level.
+
+## 025. Incidents: a pure policy, applied under the monitor row lock
+
+*2026-10-31, Phase 5*
+
+**Context.** A check result changes `consecutive_failures` and `status` and
+may open or resolve an incident. Two results of the same monitor can arrive
+at once (a slow check overlapping the next one, several workers), and there
+must never be two open incidents.
+
+**Decision.** The policy is one pure function, `domain.Evaluate(health,
+success, threshold)`, tested table-driven at the threshold boundaries.
+`Checks.SaveResult` runs it in the transaction that stores the check: it
+first locks the monitor row (`SELECT ... FOR UPDATE`, including whether an
+incident is open), then inserts the check, evaluates, updates the monitor
+and inserts or resolves the incident. The lock serializes results per
+monitor, so each sees the state the previous one left and no result is
+lost. The partial unique index `uniq_open_incident_per_monitor` stays as the
+last line of defense (`ON CONFLICT DO NOTHING`). An integration test fires
+20 concurrent failures at threshold 1: one incident, 20 counted failures.
+
+The repository calls a domain function inside its transaction instead of
+the service owning a transaction: the transaction boundary is "one check
+result", and keeping it in one place avoids a transaction abstraction
+across layers.
+
+**Alternatives.** Compute everything in one SQL statement: possible, but
+the policy would be hidden in SQL and hard to test at its boundaries.
+Rely on the unique index alone: two concurrent failures would both
+increment from the same old value and one would be lost.
+
+## 026. Incident times
+
+*2026-10-31, Phase 5*
+
+**Decision.** `started_at` is the time of the **first** failed check of the
+streak (the oldest failure after the last success), not of the check that
+reached `failure_threshold`: with threshold 3 and a 60 s interval the site
+was already down two minutes earlier, and MTTR must include that.
+`resolved_at` is the time of the first successful check. The API returns
+`duration_seconds` for resolved incidents. A monitor that is paused while an
+incident is open keeps it open until a check after resuming succeeds.
