@@ -21,6 +21,8 @@ tags:
     description: Registration, login and the current user.
   - name: monitors
     description: URLs checked on your behalf. You only ever see your own.
+  - name: incidents
+    description: Outages of your monitors, opened and resolved by the worker.
 
 paths:
   /healthz:
@@ -343,6 +345,72 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "500": { $ref: "#/components/responses/Internal" }
 
+  /api/v1/incidents:
+    get:
+      tags: [incidents]
+      summary: List your incidents
+      description: |
+        Newest first. An incident opens after failure_threshold failed checks
+        in a row and resolves at the first successful check; a monitor has
+        at most one open incident.
+      operationId: listIncidents
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: monitor_id
+          in: query
+          description: Only incidents of this monitor.
+          schema: { type: string, format: uuid }
+        - name: open
+          in: query
+          description: true for open incidents only, false for resolved only.
+          schema: { type: boolean }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Offset" }
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Incident" }
+                  total: { type: integer }
+                required: [items, total]
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  /api/v1/incidents/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Incident ID. Unknown, malformed and other users' IDs all answer 404.
+        schema: { type: string, format: uuid }
+    get:
+      tags: [incidents]
+      summary: Get one of your incidents
+      operationId: getIncident
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The incident.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Incident" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: No such incident of yours.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500": { $ref: "#/components/responses/Internal" }
+
 components:
   parameters:
     MonitorID:
@@ -533,6 +601,29 @@ components:
         p95_ttfb_ms: { type: [number, "null"] }
       required: [period, from, total_checks, failed_checks, uptime_percent,
         avg_response_ms, p95_response_ms, p95_ttfb_ms]
+
+    Incident:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        monitor_id: { type: string, format: uuid }
+        monitor_name: { type: string }
+        started_at:
+          type: string
+          format: date-time
+          description: Time of the first failed check of the streak that opened it.
+        resolved_at:
+          type: [string, "null"]
+          format: date-time
+          description: Time of the first successful check afterwards; null while open.
+        cause_kind:
+          type: [string, "null"]
+          description: error_kind of the check that opened the incident.
+          enum: [dns, timeout, connection, tls, unexpected_status, keyword_mismatch, blocked_target, unknown, null]
+        duration_seconds:
+          type: [integer, "null"]
+          description: resolved_at - started_at; null while open.
+      required: [id, monitor_id, monitor_name, started_at, resolved_at, cause_kind, duration_seconds]
 
     Error:
       type: object
