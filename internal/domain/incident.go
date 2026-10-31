@@ -25,6 +25,19 @@ type Incident struct {
 // Open reports whether the incident is still open.
 func (i Incident) Open() bool { return i.ResolvedAt == nil }
 
+// IncidentFilter narrows an incident list. Nil fields match everything.
+type IncidentFilter struct {
+	MonitorID *uuid.UUID
+	Open      *bool
+}
+
+// IncidentChange reports what saving a check result did to incidents. At
+// most one of the fields is set. Phase 6 turns them into notifications.
+type IncidentChange struct {
+	Opened   *Incident
+	Resolved *Incident
+}
+
 // Health is the part of a monitor's state that check results change.
 type Health struct {
 	Status              MonitorStatus

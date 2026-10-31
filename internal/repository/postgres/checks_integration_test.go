@@ -130,11 +130,11 @@ func TestSaveResult(t *testing.T) {
 	}
 	fail := domain.CheckResult{CheckedAt: now, ResponseTimeMs: 10000, ErrorKind: domain.ErrorTimeout, ErrorMessage: "timeout"}
 
-	require.NoError(t, env.checks.SaveResult(ctx, m.ID, domain.CheckResult{
+	env.save(t, m.ID, domain.CheckResult{
 		CheckedAt: now, Success: true, StatusCode: new(200), ResponseTimeMs: 120,
 		DNSMs: new(5), ConnectMs: new(10), TLSMs: new(30), TTFBMs: new(70),
 		HTTPProto: "HTTP/2.0", TLSVersion: "TLS1.3", TLSNotAfter: &notAfter,
-	}))
+	})
 	got := state()
 	assert.Equal(t, domain.StatusUp, got.Status)
 	assert.Zero(t, got.ConsecutiveFailures)
@@ -144,23 +144,24 @@ func TestSaveResult(t *testing.T) {
 	assert.True(t, notAfter.Equal(*got.TLSNotAfter))
 
 	for i := 1; i <= 2; i++ {
-		require.NoError(t, env.checks.SaveResult(ctx, m.ID, fail))
+		env.save(t, m.ID, fail)
 		got = state()
 		assert.Equal(t, i, got.ConsecutiveFailures)
 		assert.Equal(t, domain.StatusUp, got.Status, "below the threshold the status stays")
 	}
 	require.NotNil(t, got.TLSNotAfter, "a failed check keeps the last known certificate expiry")
 
-	require.NoError(t, env.checks.SaveResult(ctx, m.ID, fail))
+	env.save(t, m.ID, fail)
 	assert.Equal(t, domain.StatusDown, state().Status, "the third failure in a row reaches the threshold")
 
-	require.NoError(t, env.checks.SaveResult(ctx, m.ID, domain.CheckResult{CheckedAt: now, Success: true, ResponseTimeMs: 50}))
+	env.save(t, m.ID, domain.CheckResult{CheckedAt: now, Success: true, ResponseTimeMs: 50})
 	got = state()
 	assert.Equal(t, domain.StatusUp, got.Status)
 	assert.Zero(t, got.ConsecutiveFailures)
 
 	require.NoError(t, env.monitors.Delete(ctx, env.user.ID, m.ID))
-	require.ErrorIs(t, env.checks.SaveResult(ctx, m.ID, fail), domain.ErrNotFound)
+	_, err := env.checks.SaveResult(ctx, m.ID, fail)
+	require.ErrorIs(t, err, domain.ErrNotFound)
 }
 
 func TestListChecks(t *testing.T) {
@@ -169,10 +170,10 @@ func TestListChecks(t *testing.T) {
 	m := env.monitor(t, "api", true, time.Now())
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	for i := range 5 {
-		require.NoError(t, env.checks.SaveResult(ctx, m.ID, domain.CheckResult{
+		env.save(t, m.ID, domain.CheckResult{
 			CheckedAt: base.Add(time.Duration(i) * time.Minute), Success: i != 2, ResponseTimeMs: 100 + i,
 			ErrorKind: map[bool]domain.ErrorKind{true: domain.ErrorDNS}[i == 2],
-		}))
+		})
 	}
 
 	list, total, err := env.checks.List(ctx, env.user.ID, m.ID, base.Add(time.Minute), base.Add(4*time.Minute), 2, 0)
@@ -207,18 +208,18 @@ func TestStats(t *testing.T) {
 	assert.Equal(t, domain.MonitorStats{}, empty, "no checks: zero counts, nil figures")
 
 	for i, ms := range []int{100, 200, 300} {
-		require.NoError(t, env.checks.SaveResult(ctx, m.ID, domain.CheckResult{
+		env.save(t, m.ID, domain.CheckResult{
 			CheckedAt: now.Add(-time.Duration(i+1) * time.Minute), Success: true,
 			ResponseTimeMs: ms, TTFBMs: new(ms / 10),
-		}))
+		})
 	}
-	require.NoError(t, env.checks.SaveResult(ctx, m.ID, domain.CheckResult{
+	env.save(t, m.ID, domain.CheckResult{
 		CheckedAt: now.Add(-5 * time.Minute), ResponseTimeMs: 10000, ErrorKind: domain.ErrorTimeout,
-	}))
+	})
 	// Outside the period: must not count.
-	require.NoError(t, env.checks.SaveResult(ctx, m.ID, domain.CheckResult{
+	env.save(t, m.ID, domain.CheckResult{
 		CheckedAt: now.Add(-2 * time.Hour), ResponseTimeMs: 1, ErrorKind: domain.ErrorDNS,
-	}))
+	})
 
 	got, err := env.checks.Stats(ctx, env.user.ID, m.ID, now.Add(-time.Hour))
 	require.NoError(t, err)
@@ -247,9 +248,9 @@ func TestDeleteBefore(t *testing.T) {
 		if i >= 5 {
 			age = time.Hour // recent
 		}
-		require.NoError(t, env.checks.SaveResult(ctx, m.ID, domain.CheckResult{
+		env.save(t, m.ID, domain.CheckResult{
 			CheckedAt: time.Now().Add(-age), Success: true, ResponseTimeMs: 1,
-		}))
+		})
 	}
 
 	deleted, err := env.checks.DeleteBefore(ctx, cutoff, 2) // 3 batches: 2 + 2 + 1
@@ -259,4 +260,12 @@ func TestDeleteBefore(t *testing.T) {
 	_, total, err := env.checks.List(ctx, env.user.ID, m.ID, time.Now().Add(-72*time.Hour), time.Now(), 50, 0)
 	require.NoError(t, err)
 	assert.Equal(t, 2, total, "recent checks are kept")
+}
+
+// save stores a result and returns the incident change.
+func (e checksEnv) save(t *testing.T, monitorID uuid.UUID, res domain.CheckResult) domain.IncidentChange {
+	t.Helper()
+	change, err := e.checks.SaveResult(t.Context(), monitorID, res)
+	require.NoError(t, err)
+	return change
 }
