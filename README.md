@@ -8,10 +8,10 @@ Self-hosted uptime monitoring for websites with HTTP/HTTPS diagnostics,
 incidents and notifications, built to be operated: metrics, health probes,
 structured logs and graceful shutdown.
 
-> **Status: early development (Phase 3, monitors).** The API with health
-> probes, registration, JWT login and monitor management exists so far;
-> monitors are stored but not checked yet (Phase 4). Items marked *planned*
-> are not implemented yet; see [Roadmap](#roadmap).
+> **Status: early development (Phase 4, checks).** Users, monitors, scheduled
+> HTTP/HTTPS checks with phase timings, history and statistics work.
+> Incidents, notifications and metrics come next. Items marked *planned* are
+> not implemented yet; see [Roadmap](#roadmap).
 
 ## Features
 
@@ -20,6 +20,16 @@ structured logs and graceful shutdown.
 - Monitors: create, list (paginated), read, partially update (including
   pause/resume) and delete. URLs are validated against SSRF targets; each user
   sees only their own monitors and has a configurable limit.
+- HTTP/HTTPS checks by a separate `worker`: DNS, connect, TLS and
+  time-to-first-byte timings, status code, HTTP version, TLS version and
+  certificate expiry, keyword and expected-status rules, up to 5 redirects.
+  Failures are classified (`dns`, `timeout`, `connection`, `tls`,
+  `unexpected_status`, `keyword_mismatch`, `blocked_target`, `unknown`).
+- Check history and statistics (uptime %, average and p95 latency, p95 TTFB
+  over 24 h / 7 d / 30 d), computed in SQL. Old checks are deleted after
+  `CHECKS_RETENTION_DAYS`.
+- Several workers can run side by side: monitors are claimed with
+  `FOR UPDATE SKIP LOCKED`, so no monitor is checked twice.
 - One error format for every endpoint, with per-field details for invalid
   input. Every response carries an `X-Request-ID` that also appears in logs.
 - Liveness `GET /healthz`, readiness `GET /readyz` (checks PostgreSQL) and
@@ -28,9 +38,8 @@ structured logs and graceful shutdown.
 - JSON logs in production, text logs in development.
 - Graceful shutdown on `SIGTERM`/Ctrl+C.
 - `-healthcheck` flag for container health checks without curl.
-- *Planned:* HTTP/HTTPS checks with per-phase timings
-  (DNS, connect, TLS, TTFB), incidents, Telegram and webhook notifications,
-  TLS certificate expiry warnings, Prometheus metrics.
+- *Planned:* incidents, Telegram and webhook notifications, TLS certificate
+  expiry warnings, Prometheus metrics.
 
 ## Quick start
 
@@ -42,7 +51,8 @@ cp .env.example .env
 # set JWT_SECRET in .env, e.g. to the output of: openssl rand -base64 48
 make up           # PostgreSQL in Docker, waits until healthy
 make migrate-up   # apply migrations
-make run-api
+make run-api      # terminal 1
+make run-worker   # terminal 2: checks monitors
 ```
 
 In another terminal:
@@ -73,6 +83,13 @@ curl "http://localhost:8080/api/v1/monitors?limit=50&offset=0" -H "Authorization
 # {"items":[...],"total":1}
 curl -X PATCH http://localhost:8080/api/v1/monitors/<id> -H "Authorization: Bearer $TOKEN" \
   -d '{"is_active":false,"keyword":null}'   # pause; null clears an optional field
+curl "http://localhost:8080/api/v1/monitors/<id>/checks?limit=1" -H "Authorization: Bearer $TOKEN"
+# {"items":[{"checked_at":"...","success":true,"status_code":200,"response_time_ms":420,
+#   "dns_ms":12,"connect_ms":95,"tls_ms":110,"ttfb_ms":88,"http_proto":"HTTP/2.0",
+#   "tls_version":"TLS1.3","tls_not_after":"...","error_kind":null,...}],"total":1,...}
+curl "http://localhost:8080/api/v1/monitors/<id>/stats?period=7d" -H "Authorization: Bearer $TOKEN"
+# {"period":"7d","total_checks":20160,"failed_checks":3,"uptime_percent":99.985,
+#  "avg_response_ms":431.2,"p95_response_ms":610,"p95_ttfb_ms":140,...}
 curl -X DELETE http://localhost:8080/api/v1/monitors/<id> -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -91,8 +108,8 @@ The API is described in [api/openapi.yaml](api/openapi.yaml).
 
 ## Configuration
 
-All configuration comes from environment variables. `make run-api` also reads
-`.env` if it exists.
+All configuration comes from environment variables. `make run-api` and
+`make run-worker` also read `.env` if it exists.
 
 | Variable                | Description                                             | Default |
 |-------------------------|---------------------------------------------------------|---------|
@@ -107,19 +124,31 @@ All configuration comes from environment variables. `make run-api` also reads
 | `TRUST_PROXY_HEADERS`   | rate-limit by `X-Forwarded-For` (behind a proxy only)   | `false` |
 | `MAX_MONITORS_PER_USER` | monitors one user may have                              | `20`    |
 | `ALLOW_PRIVATE_TARGETS` | allow private/loopback monitor URLs (**dev only**)      | `false` |
+| `OPS_ADDR`              | worker ops port (`/healthz`, `/readyz`), internal only  | `:9091` |
+| `WORKER_CONCURRENCY`    | checks running at once in one worker                    | `20`    |
+| `SCHEDULER_BATCH_SIZE`  | monitors claimed per scheduler tick (1 s)               | `50`    |
+| `CHECKS_RETENTION_DAYS` | days check results are kept                             | `30`    |
+
+`api` uses the variables up to `ALLOW_PRIVATE_TARGETS` (except `OPS_ADDR`
+and the worker settings); `worker` uses the common ones (`APP_ENV`,
+`LOG_LEVEL`, `DATABASE_URL`, `DB_MAX_CONNS`, `SHUTDOWN_TIMEOUT`),
+`ALLOW_PRIVATE_TARGETS` and the worker settings.
 
 Invalid values stop the process at startup with an error that lists every
 problem.
 
 ## Operations
 
-| Endpoint / flag    | Purpose                                                           |
-|--------------------|-------------------------------------------------------------------|
-| `GET /healthz`     | liveness: the process serves HTTP; does not check dependencies    |
-| `GET /readyz`      | readiness: 200 if PostgreSQL answers within 2 s, otherwise 503    |
-| `GET /version`     | `{"version","commit","built_at"}` of the running build            |
-| `api -healthcheck` | probes `/healthz` on `HTTP_ADDR`, exit code 0 = healthy, 1 = not  |
-| `api -version`     | prints version, commit, build time and Go version                 |
+| Endpoint / flag          | Purpose                                                              |
+|--------------------------|----------------------------------------------------------------------|
+| api `GET /healthz`       | liveness: the process serves HTTP; does not check dependencies       |
+| api `GET /readyz`        | readiness: 200 if PostgreSQL answers within 2 s, otherwise 503       |
+| api `GET /version`       | `{"version","commit","built_at"}` of the running build               |
+| worker `:9091/healthz`   | liveness of the worker                                               |
+| worker `:9091/readyz`    | readiness: PostgreSQL answers and the scheduler claimed work < 30 s ago |
+| `api -healthcheck`       | probes `/healthz` on `HTTP_ADDR`, exit code 0 = healthy, 1 = not     |
+| `worker -healthcheck`    | probes `/healthz` on `OPS_ADDR`, exit code 0 = healthy, 1 = not      |
+| `api -version`, `worker -version` | print version, commit, build time and Go version            |
 | `migrate up`       | applies all pending migrations; run before starting a new version |
 | `migrate down`     | rolls back exactly one migration                                  |
 | `migrate status`   | lists migrations and whether they are applied                     |
@@ -130,7 +159,13 @@ problem.
   `user_id`. Each request gets one `http request` access-log record; probe
   requests are logged at debug level.
 - **Shutdown:** on `SIGTERM` the API stops accepting connections and waits up
-  to `SHUTDOWN_TIMEOUT` for in-flight requests.
+  to `SHUTDOWN_TIMEOUT` for in-flight requests. The worker stops claiming
+  monitors and waits up to `SHUTDOWN_TIMEOUT` for running checks to finish
+  and save their results, then aborts the rest.
+- **Scaling the worker:** run as many as you like; each claims due monitors
+  with `FOR UPDATE SKIP LOCKED` and only as many as it has free slots, so
+  a monitor is never checked twice and a stopped worker leaves no claimed
+  work behind (at most one interval of delay for the checks it was running).
 - **Database outage:** `/readyz` returns 503 and the API keeps running; it
   serves again as soon as the database is back. `/healthz` stays 200.
 - *Planned:* ops port with `/metrics` (catalog in `docs/metrics.md`) and the
@@ -189,8 +224,11 @@ could make it request `http://169.254.169.254/` (cloud credentials),
   multicast, unspecified or reserved addresses, `localhost`, or numeric host
   forms such as `2130706433` or `0x7f.1`.
 - This check is syntactic: a hostname can resolve to an internal address,
-  now or later (DNS rebinding). *Planned (Phase 4):* the checker verifies
-  every resolved address again at connect time and on every redirect.
+  now or later (DNS rebinding). So the worker checks again **at connect
+  time**: `net.Dialer.Control` sees the final IP of every connection,
+  including each redirect hop, and refuses blocked addresses
+  (`error_kind = blocked_target`). Redirect targets also pass the URL rules.
+  The checker never uses `HTTP_PROXY`.
 - `ALLOW_PRIVATE_TARGETS=true` disables the address rules (not the scheme and
   credential rules) so you can monitor local services during development.
   **Never enable it in production.** The API logs a warning at startup when it
@@ -249,7 +287,7 @@ Deployment, monitoring stack, SLOs, alerts and runbooks live in the
 - [x] Phase 1: PostgreSQL, migrations, `/readyz`, integration tests
 - [x] Phase 2: users and authentication
 - [x] Phase 3: monitors CRUD
-- [ ] Phase 4: checks, scheduler, statistics
+- [x] Phase 4: checks, scheduler, statistics
 - [ ] Phase 5: incidents
 - [ ] Phase 6: notifications and certificate warnings
 - [ ] Phase 7: observability
