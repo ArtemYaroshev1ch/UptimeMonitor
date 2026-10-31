@@ -192,7 +192,7 @@ func (s *Scheduler) logIncident(ctx context.Context, change domain.IncidentChang
 		inc := change.Resolved
 		s.log.InfoContext(ctx, "incident resolved",
 			slog.String("incident_id", inc.ID.String()),
-			slog.Duration("duration", inc.ResolvedAt.Sub(inc.StartedAt)),
+			slog.Float64("duration_seconds", inc.ResolvedAt.Sub(inc.StartedAt).Seconds()),
 		)
 	}
 }

@@ -278,7 +278,7 @@ func TestSchedulerLogsIncidents(t *testing.T) {
 		{name: "opened", change: domain.IncidentChange{Opened: &incident},
 			want: []string{"level=WARN", `msg="incident opened"`, "incident_id=" + incident.ID.String(), "cause_kind=timeout"}},
 		{name: "resolved", change: domain.IncidentChange{Resolved: &domain.Incident{ID: incident.ID, StartedAt: started, ResolvedAt: &resolved}},
-			want: []string{"level=INFO", `msg="incident resolved"`, "duration=1m30s"}},
+			want: []string{"level=INFO", `msg="incident resolved"`, "duration_seconds=90"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
