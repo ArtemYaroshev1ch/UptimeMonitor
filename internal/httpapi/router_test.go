@@ -10,8 +10,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-
-	"github.com/artemyaroshev1ch/uptime-monitor/internal/observability"
 )
 
 // fakeDB is a Pinger that returns err.
@@ -19,16 +17,9 @@ type fakeDB struct{ err error }
 
 func (f fakeDB) Ping(context.Context) error { return f.err }
 
-func newTestRouter(db fakeDB) http.Handler {
-	return NewRouter(Deps{
-		BuildInfo: observability.BuildInfo{
-			Version: "1.2.3",
-			Commit:  "abc123",
-			BuiltAt: "2026-01-02T03:04:05Z",
-		},
-		DB:  db,
-		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
+func newTestRouter(t *testing.T, db fakeDB) http.Handler {
+	t.Helper()
+	return newTestAPI(t, db, slog.New(slog.NewTextHandler(io.Discard, nil))).router
 }
 
 func TestRouter(t *testing.T) {
@@ -109,7 +100,7 @@ func TestRouter(t *testing.T) {
 			req := httptest.NewRequestWithContext(t.Context(), tt.method, tt.path, http.NoBody)
 			rec := httptest.NewRecorder()
 
-			newTestRouter(tt.db).ServeHTTP(rec, req)
+			newTestRouter(t, tt.db).ServeHTTP(rec, req)
 
 			assert.Equal(t, tt.wantStatus, rec.Code)
 			if tt.wantBody != "" {

@@ -234,7 +234,7 @@ func TestAuthenticate(t *testing.T) {
 			var gotID uuid.UUID
 			var logs bytes.Buffer
 			log := jsonLogger(&logs)
-			h := Authenticate(verifier, log)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h := Authenticate(verifier, log)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 				id, ok := UserID(r.Context())
 				require.True(t, ok)
 				gotID = id

@@ -8,24 +8,64 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/httpapi/handler"
+	"github.com/artemyaroshev1ch/uptime-monitor/internal/httpapi/middleware"
+	"github.com/artemyaroshev1ch/uptime-monitor/internal/httpapi/response"
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/observability"
+	"github.com/artemyaroshev1ch/uptime-monitor/internal/platform/clock"
 )
 
 // Deps holds everything the router needs to build handlers.
 type Deps struct {
 	BuildInfo observability.BuildInfo
 	// DB is checked by /readyz.
-	DB  handler.Pinger
-	Log *slog.Logger
+	DB    handler.Pinger
+	Log   *slog.Logger
+	Clock clock.Clock
+
+	Auth   handler.AuthService
+	Tokens middleware.TokenVerifier
+	// AuthLimiter limits /api/v1/auth/* per client IP.
+	AuthLimiter *middleware.RateLimiter
+	// TrustProxyHeaders: see config.API.TrustProxyHeaders.
+	TrustProxyHeaders bool
 }
 
 // NewRouter returns the handler of the public API port.
 func NewRouter(d Deps) http.Handler {
 	r := chi.NewRouter()
 
+	// Order matters. RequestID comes first, so everything after it logs the
+	// ID. Recover sits outside Logging, so a panic is still access-logged
+	// (as a 500) once Recover has written the response. The metrics
+	// middleware (Phase 7) goes between Recover and Logging.
+	r.Use(
+		middleware.RequestID,
+		middleware.Recover(d.Log),
+		middleware.Logging(d.Log, d.Clock),
+		middleware.BodyLimit(middleware.MaxBodyBytes),
+	)
+	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
+		response.WriteError(w, http.StatusNotFound, response.CodeNotFound, "Resource not found", nil)
+	})
+
 	r.Get("/healthz", handler.Healthz)
 	r.Get("/readyz", handler.Readyz(d.DB, d.Log))
 	r.Get("/version", handler.Version(d.BuildInfo))
+
+	auth := handler.NewAuth(d.Auth, d.Log)
+	r.Route("/api/v1", func(r chi.Router) {
+		r.Route("/auth", func(r chi.Router) {
+			// Limits password guessing and mass registration.
+			r.Use(middleware.RateLimit(d.AuthLimiter, middleware.ClientIP(d.TrustProxyHeaders)))
+			r.Post("/register", auth.Register)
+			r.Post("/login", auth.Login)
+		})
+
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.Authenticate(d.Tokens, d.Log))
+			r.Get("/me", auth.Me)
+		})
+	})
 
 	return r
 }
