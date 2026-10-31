@@ -146,6 +146,7 @@ func serve(ctx context.Context, cfg config.API, info observability.BuildInfo, st
 	monitorRepo := repository.NewMonitors(pool)
 	monitorSvc := svc.NewMonitors(monitorRepo, checker.NewTargetPolicy(cfg.AllowPrivateTargets), clk, cfg.MaxMonitorsPerUser)
 	checkSvc := svc.NewChecks(monitorRepo, repository.NewChecks(pool), clk)
+	incidentSvc := svc.NewIncidents(repository.NewIncidents(pool))
 
 	router := httpapi.NewRouter(httpapi.Deps{
 		BuildInfo:         info,
@@ -155,6 +156,7 @@ func serve(ctx context.Context, cfg config.API, info observability.BuildInfo, st
 		Auth:              authSvc,
 		Monitors:          monitorSvc,
 		Checks:            checkSvc,
+		Incidents:         incidentSvc,
 		Tokens:            tokens,
 		AuthLimiter:       middleware.NewRateLimiter(authRateLimit, time.Minute, clk),
 		TrustProxyHeaders: cfg.TrustProxyHeaders,

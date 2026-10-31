@@ -22,10 +22,11 @@ type Deps struct {
 	Log   *slog.Logger
 	Clock clock.Clock
 
-	Auth     handler.AuthService
-	Monitors handler.MonitorService
-	Checks   handler.CheckService
-	Tokens   middleware.TokenVerifier
+	Auth      handler.AuthService
+	Monitors  handler.MonitorService
+	Checks    handler.CheckService
+	Incidents handler.IncidentService
+	Tokens    middleware.TokenVerifier
 	// AuthLimiter limits /api/v1/auth/* per client IP.
 	AuthLimiter *middleware.RateLimiter
 	// TrustProxyHeaders: see config.API.TrustProxyHeaders.
@@ -57,6 +58,7 @@ func NewRouter(d Deps) http.Handler {
 	auth := handler.NewAuth(d.Auth, d.Log)
 	monitors := handler.NewMonitors(d.Monitors, d.Log)
 	checks := handler.NewChecks(d.Checks, d.Log)
+	incidents := handler.NewIncidents(d.Incidents, d.Log)
 	r.Route("/api/v1", func(r chi.Router) {
 		// Limits password guessing and mass registration; both routes share
 		// one budget per IP. Attached with With rather than in a Route
@@ -78,6 +80,9 @@ func NewRouter(d Deps) http.Handler {
 			r.Delete("/monitors/{id}", monitors.Delete)
 			r.Get("/monitors/{id}/checks", checks.List)
 			r.Get("/monitors/{id}/stats", checks.Stats)
+
+			r.Get("/incidents", incidents.List)
+			r.Get("/incidents/{id}", incidents.Get)
 		})
 	})
 

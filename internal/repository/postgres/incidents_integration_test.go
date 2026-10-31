@@ -163,11 +163,11 @@ func TestIncidentsListAndGet(t *testing.T) {
 	// api: one resolved incident, then one open. web: one open.
 	api := env.monitor(t, "api", true, time.Now())
 	web := env.monitor(t, "web", true, time.Now())
-	outage := func(m domain.Monitor, start time.Time, recover bool) {
+	outage := func(m domain.Monitor, start time.Time, recovers bool) {
 		for i := range 3 {
 			env.save(t, m.ID, failure(start.Add(time.Duration(i)*time.Minute), domain.ErrorTimeout))
 		}
-		if recover {
+		if recovers {
 			env.save(t, m.ID, success(start.Add(5*time.Minute)))
 		}
 	}
