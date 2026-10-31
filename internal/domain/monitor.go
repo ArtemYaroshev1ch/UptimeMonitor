@@ -1,14 +1,10 @@
 package domain
 
 import (
-	"errors"
 	"time"
 
 	"github.com/google/uuid"
 )
-
-// ErrLimitExceeded: the user already has the maximum number of monitors.
-var ErrLimitExceeded = errors.New("limit exceeded")
 
 // MonitorStatus is the state derived from recent checks.
 type MonitorStatus string

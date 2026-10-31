@@ -16,6 +16,9 @@ var (
 	ErrConflict = errors.New("conflict")
 	// ErrUnauthorized: missing or invalid credentials.
 	ErrUnauthorized = errors.New("unauthorized")
+	// ErrLimitExceeded: the user already has the maximum number of a
+	// resource (MAX_MONITORS_PER_USER).
+	ErrLimitExceeded = errors.New("limit exceeded")
 )
 
 // FieldError describes one invalid input field.

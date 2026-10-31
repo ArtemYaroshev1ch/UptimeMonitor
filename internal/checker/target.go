@@ -28,7 +28,7 @@ var (
 // netip.Addr.IsPrivate. Cloud providers use it for internal services too.
 var (
 	cgnat       = netip.MustParsePrefix("100.64.0.0/10")
-	thisNetwork = netip.MustParsePrefix("0.0.0.0/8")    // RFC 1122: "this host on this network"
+	thisNetwork = netip.MustParsePrefix("0.0.0.0/8")   // RFC 1122: "this host on this network"
 	reserved    = netip.MustParsePrefix("240.0.0.0/4") // RFC 1112, includes 255.255.255.255
 )
 
@@ -128,7 +128,8 @@ func isNumericLabel(s string) bool {
 	}
 	for _, c := range digits {
 		isDigit := c >= '0' && c <= '9'
-		if !isDigit && !(isHex && (c >= 'a' && c <= 'f')) {
+		isHexDigit := isHex && c >= 'a' && c <= 'f'
+		if !isDigit && !isHexDigit {
 			return false
 		}
 	}

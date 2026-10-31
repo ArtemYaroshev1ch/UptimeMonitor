@@ -127,12 +127,9 @@ func TestMonitorsList(t *testing.T) {
 
 	alice, err := users.Create(ctx, "alice@example.com", "hash")
 	require.NoError(t, err)
-	var names []string
 	for i := range 5 {
-		name := fmt.Sprintf("m%d", i)
-		_, err := monitors.Create(ctx, alice.ID, settings(name), 20)
+		_, err := monitors.Create(ctx, alice.ID, settings(fmt.Sprintf("m%d", i)), 20)
 		require.NoError(t, err)
-		names = append(names, name)
 	}
 
 	page := func(limit, offset int) []string {
