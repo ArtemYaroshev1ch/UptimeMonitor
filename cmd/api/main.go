@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/auth"
+	"github.com/artemyaroshev1ch/uptime-monitor/internal/checker"
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/config"
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/httpapi"
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/httpapi/middleware"
@@ -139,6 +140,11 @@ func serve(ctx context.Context, cfg config.API, info observability.BuildInfo, st
 	if err != nil {
 		return err
 	}
+	if cfg.AllowPrivateTargets {
+		log.Warn("ALLOW_PRIVATE_TARGETS is on: monitors may target internal addresses; never use this in production")
+	}
+	monitorSvc := svc.NewMonitors(repository.NewMonitors(pool),
+		checker.NewTargetPolicy(cfg.AllowPrivateTargets), clk, cfg.MaxMonitorsPerUser)
 
 	router := httpapi.NewRouter(httpapi.Deps{
 		BuildInfo:         info,
@@ -146,6 +152,7 @@ func serve(ctx context.Context, cfg config.API, info observability.BuildInfo, st
 		Log:               log,
 		Clock:             clk,
 		Auth:              authSvc,
+		Monitors:          monitorSvc,
 		Tokens:            tokens,
 		AuthLimiter:       middleware.NewRateLimiter(authRateLimit, time.Minute, clk),
 		TrustProxyHeaders: cfg.TrustProxyHeaders,
