@@ -1,11 +1,9 @@
 package service
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -16,108 +14,12 @@ import (
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/checker"
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/domain"
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/platform/clock"
+	"github.com/artemyaroshev1ch/uptime-monitor/internal/repository/memory"
 )
-
-// fakeMonitors is an in-memory MonitorRepository with the same ownership
-// and limit semantics as the PostgreSQL one.
-type fakeMonitors struct {
-	mu       sync.Mutex
-	monitors map[uuid.UUID]domain.Monitor
-	now      time.Time
-	err      error
-}
-
-func newFakeMonitors(now time.Time) *fakeMonitors {
-	return &fakeMonitors{monitors: map[uuid.UUID]domain.Monitor{}, now: now}
-}
-
-func (f *fakeMonitors) Create(_ context.Context, userID uuid.UUID, s domain.MonitorSettings, limit int) (domain.Monitor, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.err != nil {
-		return domain.Monitor{}, f.err
-	}
-	count := 0
-	for _, m := range f.monitors {
-		if m.UserID == userID {
-			count++
-		}
-	}
-	if count >= limit {
-		return domain.Monitor{}, domain.ErrLimitExceeded
-	}
-	m := domain.Monitor{
-		ID: uuid.New(), UserID: userID, MonitorSettings: s, Status: domain.StatusUnknown,
-		NextCheckAt: f.now, CreatedAt: f.now, UpdatedAt: f.now,
-	}
-	f.monitors[m.ID] = m
-	return m, nil
-}
-
-func (f *fakeMonitors) Get(_ context.Context, userID, id uuid.UUID) (domain.Monitor, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.err != nil {
-		return domain.Monitor{}, f.err
-	}
-	m, ok := f.monitors[id]
-	if !ok || m.UserID != userID {
-		return domain.Monitor{}, domain.ErrNotFound
-	}
-	return m, nil
-}
-
-func (f *fakeMonitors) List(_ context.Context, userID uuid.UUID, limit, offset int) ([]domain.Monitor, int, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.err != nil {
-		return nil, 0, f.err
-	}
-	var all []domain.Monitor
-	for _, m := range f.monitors {
-		if m.UserID == userID {
-			all = append(all, m)
-		}
-	}
-	total := len(all)
-	all = all[min(offset, total):min(offset+limit, total)]
-	return all, total, nil
-}
-
-func (f *fakeMonitors) Update(_ context.Context, userID, id uuid.UUID, fn func(*domain.Monitor) error) (domain.Monitor, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.err != nil {
-		return domain.Monitor{}, f.err
-	}
-	m, ok := f.monitors[id]
-	if !ok || m.UserID != userID {
-		return domain.Monitor{}, domain.ErrNotFound
-	}
-	if err := fn(&m); err != nil {
-		return domain.Monitor{}, err
-	}
-	f.monitors[id] = m
-	return m, nil
-}
-
-func (f *fakeMonitors) Delete(_ context.Context, userID, id uuid.UUID) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.err != nil {
-		return f.err
-	}
-	m, ok := f.monitors[id]
-	if !ok || m.UserID != userID {
-		return domain.ErrNotFound
-	}
-	delete(f.monitors, id)
-	return nil
-}
 
 type monitorsEnv struct {
 	svc   *Monitors
-	repo  *fakeMonitors
+	repo  *memory.Monitors
 	clock *clock.Fake
 	user  uuid.UUID
 }
@@ -125,7 +27,7 @@ type monitorsEnv struct {
 func newMonitorsEnv(t *testing.T) monitorsEnv {
 	t.Helper()
 	clk := clock.NewFake(testNow)
-	repo := newFakeMonitors(testNow)
+	repo := memory.NewMonitors(clk.Now)
 	return monitorsEnv{
 		svc:   NewMonitors(repo, checker.NewTargetPolicy(false), clk, 3),
 		repo:  repo,
@@ -293,7 +195,7 @@ func TestCreateMonitorValidation(t *testing.T) {
 			_, err := env.svc.Create(t.Context(), env.user, patch(t, tt.body))
 
 			assert.Equal(t, tt.want, validationDetails(t, err))
-			assert.Empty(t, env.repo.monitors)
+			assert.Zero(t, env.repo.Len())
 		})
 	}
 }
@@ -348,7 +250,9 @@ func TestUpdateMonitorValidation(t *testing.T) {
 		{Field: "interval_seconds", Issue: "must not be null"},
 		{Field: "url", Issue: "must point to a public address"},
 	}, validationDetails(t, err))
-	assert.Equal(t, m, env.repo.monitors[m.ID], "nothing is saved")
+	stored, err := env.repo.Get(t.Context(), env.user, m.ID)
+	require.NoError(t, err)
+	assert.Equal(t, m, stored, "nothing is saved")
 }
 
 // A monitor whose URL the current policy would reject (created while
@@ -419,9 +323,9 @@ func TestUpdateMonitorReschedules(t *testing.T) {
 				initial += ","
 			}
 			m := env.create(t, initial+`"name":"api","url":"https://example.com"}`)
-			stored := env.repo.monitors[m.ID]
+			stored := m
 			stored.NextCheckAt = later
-			env.repo.monitors[m.ID] = stored
+			env.repo.Put(stored)
 
 			got, err := env.svc.Update(t.Context(), env.user, m.ID, patch(t, tt.update))
 
@@ -470,7 +374,7 @@ func TestMonitorsRepositoryFailure(t *testing.T) {
 	env := newMonitorsEnv(t)
 	m := env.create(t, `{"name":"api","url":"https://example.com"}`)
 	dbErr := errors.New("connection reset")
-	env.repo.err = dbErr
+	env.repo.FailWith(dbErr)
 	ctx := t.Context()
 
 	_, err := env.svc.Create(ctx, env.user, patch(t, `{"name":"api","url":"https://example.com"}`))

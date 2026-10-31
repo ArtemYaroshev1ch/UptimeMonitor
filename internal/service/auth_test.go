@@ -1,7 +1,6 @@
 package service
 
 import (
-	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -16,60 +15,8 @@ import (
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/auth"
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/domain"
 	"github.com/artemyaroshev1ch/uptime-monitor/internal/platform/clock"
+	"github.com/artemyaroshev1ch/uptime-monitor/internal/repository/memory"
 )
-
-// fakeUsers is an in-memory UserRepository. err, when set, is returned by
-// every call, to simulate a database failure.
-type fakeUsers struct {
-	mu      sync.Mutex
-	byEmail map[string]domain.User
-	err     error
-}
-
-func newFakeUsers() *fakeUsers {
-	return &fakeUsers{byEmail: map[string]domain.User{}}
-}
-
-func (f *fakeUsers) Create(_ context.Context, email, hash string) (domain.User, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.err != nil {
-		return domain.User{}, f.err
-	}
-	if _, ok := f.byEmail[email]; ok {
-		return domain.User{}, domain.ErrConflict
-	}
-	u := domain.User{ID: uuid.New(), Email: email, PasswordHash: hash, CreatedAt: time.Now()}
-	f.byEmail[email] = u
-	return u, nil
-}
-
-func (f *fakeUsers) GetByEmail(_ context.Context, email string) (domain.User, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.err != nil {
-		return domain.User{}, f.err
-	}
-	u, ok := f.byEmail[email]
-	if !ok {
-		return domain.User{}, domain.ErrNotFound
-	}
-	return u, nil
-}
-
-func (f *fakeUsers) GetByID(_ context.Context, id uuid.UUID) (domain.User, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.err != nil {
-		return domain.User{}, f.err
-	}
-	for _, u := range f.byEmail {
-		if u.ID == id {
-			return u, nil
-		}
-	}
-	return domain.User{}, domain.ErrNotFound
-}
 
 // countingHasher counts Compare calls of the real bcrypt hasher.
 type countingHasher struct {
@@ -89,14 +36,14 @@ var testNow = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 
 type testEnv struct {
 	svc    *Auth
-	users  *fakeUsers
+	users  *memory.Users
 	hasher *countingHasher
 	tokens *auth.Tokens
 }
 
 func newTestEnv(t *testing.T) testEnv {
 	t.Helper()
-	users := newFakeUsers()
+	users := memory.NewUsers(time.Now)
 	hasher := &countingHasher{Passwords: auth.NewPasswords(bcrypt.MinCost)}
 	tokens := auth.NewTokens([]byte("0123456789abcdef0123456789abcdef"), time.Hour, clock.NewFake(testNow))
 	svc, err := NewAuth(users, hasher, tokens)
@@ -181,7 +128,7 @@ func TestRegisterValidation(t *testing.T) {
 			_, err := env.svc.Register(t.Context(), tt.creds)
 
 			assert.Equal(t, tt.want, validationDetails(t, err))
-			assert.Empty(t, env.users.byEmail, "nothing is stored")
+			assert.Zero(t, env.users.Len(), "nothing is stored")
 		})
 	}
 }
@@ -190,7 +137,7 @@ func TestRegisterRepositoryFailure(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
 	dbErr := errors.New("connection reset")
-	env.users.err = dbErr
+	env.users.FailWith(dbErr)
 
 	_, err := env.svc.Register(t.Context(), Credentials{Email: "alice@example.com", Password: "password-1"})
 
@@ -256,7 +203,7 @@ func TestLoginRepositoryFailure(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
 	dbErr := errors.New("connection reset")
-	env.users.err = dbErr
+	env.users.FailWith(dbErr)
 
 	_, err := env.svc.Login(t.Context(), Credentials{Email: "alice@example.com", Password: "password-1"})
 
@@ -278,7 +225,7 @@ func TestMe(t *testing.T) {
 	require.ErrorIs(t, err, domain.ErrUnauthorized, "token of a deleted user")
 
 	dbErr := errors.New("connection reset")
-	env.users.err = dbErr
+	env.users.FailWith(dbErr)
 	_, err = env.svc.Me(t.Context(), u.ID)
 	require.ErrorIs(t, err, dbErr)
 }
