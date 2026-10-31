@@ -27,7 +27,8 @@ type Options struct {
 
 // New returns a logger that writes to w. Every record carries the service
 // name and version, as the logging contract with uptime-infra requires; time,
-// level and msg are added by slog itself.
+// level and msg are added by slog itself. Attributes stored in the context
+// with WithAttrs (request_id) are added to records logged with that context.
 func New(w io.Writer, opts Options) *slog.Logger {
 	handlerOpts := &slog.HandlerOptions{Level: opts.Level}
 
@@ -38,7 +39,7 @@ func New(w io.Writer, opts Options) *slog.Logger {
 		h = slog.NewTextHandler(w, handlerOpts)
 	}
 
-	return slog.New(h).With(
+	return slog.New(contextHandler{h}).With(
 		slog.String("service", opts.Service),
 		slog.String("version", opts.Version),
 	)

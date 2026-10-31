@@ -9,9 +9,12 @@ import (
 	"context"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
+
+	"github.com/artemyaroshev1ch/uptime-monitor/internal/platform/postgres"
 )
 
 // Image is the PostgreSQL image used by tests. Keep it in sync with
@@ -43,4 +46,24 @@ func Start(t testing.TB) string {
 	url, err := ctr.ConnectionString(ctx, "sslmode=disable")
 	require.NoError(t, err)
 	return url
+}
+
+// NewPool starts PostgreSQL, applies all migrations and returns a connection
+// pool to it: the starting point for repository tests.
+func NewPool(t testing.TB) *pgxpool.Pool {
+	t.Helper()
+	url := Start(t)
+
+	db, err := postgres.OpenDB(url)
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	migrator, err := postgres.NewMigrator(db)
+	require.NoError(t, err)
+	_, err = migrator.Up(context.Background())
+	require.NoError(t, err, "apply migrations")
+
+	pool, err := postgres.NewPool(context.Background(), postgres.PoolConfig{URL: url, MaxConns: 4})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	return pool
 }

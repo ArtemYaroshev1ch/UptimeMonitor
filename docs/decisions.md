@@ -199,3 +199,100 @@ code is linted too. CI has a separate `integration` job.
 faster, worth doing once the number of tests makes the start-up time (~3 s)
 noticeable. An external database from compose: tests would depend on manual
 setup and leftover state.
+
+## 011. Access tokens: HS256 JWT via golang-jwt, no refresh tokens
+
+*2026-10-31, Phase 2*
+
+**Context.** The API needs stateless authentication that works with N API
+replicas. The stack (PROMPT.md section 4) fixes `golang-jwt/jwt/v5`.
+
+**Decision.** One HS256-signed access token per login, lifetime
+`ACCESS_TOKEN_TTL` (12 h), claims `sub` (user ID), `iss`, `iat`, `exp`. The
+parser accepts only HS256 and requires `exp`, so tokens with `alg: none`, an
+other algorithm or no expiry are rejected. `JWT_SECRET` must be at least 32
+bytes. A valid token of a deleted user gets 401, like any invalid token.
+
+**Alternatives.** Hand-written HMAC JWT on the standard library: little code,
+but parsing untrusted tokens is exactly where subtle bugs hide. Refresh tokens
+with rotation and logout: deferred to the stretch list (PROMPT.md section 17);
+until then a token cannot be revoked before it expires, short of rotating
+`JWT_SECRET` (which logs everyone out).
+
+## 012. Emails are stored lowercase
+
+*2026-10-31, Phase 2*
+
+**Context.** `users.email` is `UNIQUE`, but case-sensitive: `Alice@x.com` and
+`alice@x.com` would be two accounts, and a user who typed a different case at
+login would get "invalid credentials".
+
+**Decision.** The service trims and lowercases emails before registration and
+login. The unique index then enforces one account per address; a duplicate is
+reported as 409 from the unique violation (no racy "SELECT first").
+
+**Alternatives.** A `citext` column or a unique index on `lower(email)`: same
+effect in the database, but needs a migration and still requires lowercasing
+for lookups by index. Per RFC 5321 the local part is case-sensitive, but no
+real provider treats it that way.
+
+## 013. Auth rate limit: in memory, per client IP, optional proxy header
+
+*2026-10-31, Phase 2*
+
+**Context.** `/api/v1/auth/*` is limited to 10 requests per minute per IP.
+The API has no shared store (no Redis), and in production it runs behind a
+reverse proxy, where the TCP peer is the proxy.
+
+**Decision.** A token bucket per IP (`golang.org/x/time/rate`, burst 10,
+refill one per 6 s), shared by register and login. Buckets idle for a minute
+are dropped inline, at most once a minute, so there is no cleanup goroutine.
+The client IP is the TCP peer unless `TRUST_PROXY_HEADERS=true` (a variable
+added to the PROMPT.md section 12 list); then it is the **last**
+`X-Forwarded-For` entry, the one appended by our own proxy. Earlier entries
+come from the client and are ignored.
+
+**Known limitations.** Each API replica counts separately, so with N replicas
+the effective limit is N x 10. Every IPv6 address is a separate client,
+though one user may own a whole /64. Both are acceptable for brute-force
+protection at this scale; a shared limiter (PostgreSQL or Redis) would fix
+the first.
+
+**Alternatives.** chi `middleware.RealIP`: trusts headers from anyone, so a
+client could pick a new "IP" per request and bypass the limit.
+
+## 014. Request decoding: unknown fields rejected, oversized body is a 400
+
+*2026-10-31, Phase 2*
+
+**Context.** The error codes are a closed list (PROMPT.md section 9); 413 is
+not on it. The body limit is 1 MiB.
+
+**Decision.** JSON bodies are decoded strictly: unknown fields, trailing data
+and wrong types are `validation_failed` with the field in `details`. A body
+over 1 MiB is also `validation_failed` (`{"field":"body","issue":"must be at
+most 1048576 bytes"}`), status 400.
+
+**Alternatives.** 413 with a new code `payload_too_large`: more precise HTTP,
+but extends the public error contract for a case no legitimate client hits.
+Ignoring unknown fields: a typo such as `"pasword"` would yield a confusing
+"password is required".
+
+## 015. Request ID from the client is reused if it is safe
+
+*2026-10-31, Phase 2*
+
+**Context.** Every log line of a request needs `request_id`, and services deep
+in the call stack log with only a `context.Context`.
+
+**Decision.** The request ID middleware reuses an incoming `X-Request-ID` (a
+proxy may have set it, which links proxy and API logs) if it is at most 64
+characters of `[A-Za-z0-9._-]`; otherwise it generates 128 random bits. The ID
+is returned in `X-Request-ID` and stored in the context; a wrapping
+`slog.Handler` (`logger.WithAttrs`) adds it, and `user_id` after
+authentication, to every record logged with that context.
+
+**Alternatives.** chi `middleware.RequestID`: does not reuse the incoming
+header and does not reach slog. A per-request `*slog.Logger` in the context:
+every function would have to fetch the logger from the context instead of
+using its injected one.

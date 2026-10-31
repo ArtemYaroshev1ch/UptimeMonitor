@@ -1,0 +1,265 @@
+openapi: 3.1.0
+info:
+  title: Uptime Monitor API
+  version: 0.0.0-dev
+  description: |
+    Public REST API of Uptime Monitor. Maintained by hand; it describes only
+    the endpoints implemented so far.
+
+    Every response carries `X-Request-ID`. Quote it when reporting a problem:
+    the same ID is in the server logs.
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: http://localhost:8080
+
+tags:
+  - name: system
+    description: Probes and build information.
+  - name: auth
+    description: Registration, login and the current user.
+
+paths:
+  /healthz:
+    get:
+      tags: [system]
+      summary: Liveness probe
+      description: The process serves HTTP. Does not check the database.
+      operationId: healthz
+      responses:
+        "200":
+          description: Alive.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, const: ok }
+                required: [status]
+
+  /readyz:
+    get:
+      tags: [system]
+      summary: Readiness probe
+      description: The instance can serve requests (PostgreSQL answers within 2 s).
+      operationId: readyz
+      responses:
+        "200":
+          description: Ready.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+              example: { status: ok, checks: { database: ok } }
+        "503":
+          description: Not ready; take the instance out of the load balancer.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+              example: { status: unavailable, checks: { database: unavailable } }
+
+  /version:
+    get:
+      tags: [system]
+      summary: Build information
+      operationId: version
+      responses:
+        "200":
+          description: The running build.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: { type: string, example: 1.2.0 }
+                  commit: { type: string, example: 3f2a9c1d0b4e }
+                  built_at: { type: string, example: "2026-10-31T12:00:00Z" }
+                required: [version, commit, built_at]
+
+  /api/v1/auth/register:
+    post:
+      tags: [auth]
+      summary: Create an account
+      description: |
+        The email is trimmed and lowercased. Rate-limited together with
+        login: 10 requests per minute per client IP.
+      operationId: register
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Credentials" }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  /api/v1/auth/login:
+    post:
+      tags: [auth]
+      summary: Log in and get an access token
+      description: |
+        An unknown email and a wrong password both return 401. Rate-limited
+        together with register: 10 requests per minute per client IP.
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Credentials" }
+      responses:
+        "200":
+          description: Logged in.
+          headers:
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Token" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  /api/v1/me:
+    get:
+      tags: [auth]
+      summary: The current user
+      operationId: me
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The owner of the token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    Readiness:
+      type: object
+      properties:
+        status: { type: string, enum: [ok, unavailable] }
+        checks:
+          type: object
+          additionalProperties: { type: string, enum: [ok, unavailable] }
+      required: [status, checks]
+
+    Credentials:
+      type: object
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+          example: alice@example.com
+        password:
+          type: string
+          minLength: 8
+          description: At least 8 characters and at most 72 bytes (the bcrypt limit).
+          example: correct-horse
+      required: [email, password]
+
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        created_at: { type: string, format: date-time }
+      required: [id, email, created_at]
+
+    Token:
+      type: object
+      properties:
+        access_token:
+          type: string
+          description: "JWT; send it as `Authorization: Bearer <token>`."
+        token_type: { type: string, const: Bearer }
+        expires_at: { type: string, format: date-time }
+      required: [access_token, token_type, expires_at]
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              enum: [validation_failed, unauthorized, not_found, conflict, rate_limited, internal]
+            message: { type: string }
+            details:
+              type: array
+              description: Present for validation_failed only.
+              items:
+                type: object
+                properties:
+                  field:
+                    type: string
+                    description: JSON field name, or "body" for the request as a whole.
+                  issue: { type: string }
+                required: [field, issue]
+          required: [code, message]
+      required: [error]
+
+  responses:
+    ValidationFailed:
+      description: |
+        Invalid input: malformed JSON, unknown fields, wrong types, rule
+        violations, or a body over 1 MiB.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: validation_failed
+              message: Invalid request
+              details:
+                - { field: password, issue: must be at least 8 characters }
+    Unauthorized:
+      description: Missing, invalid or expired credentials.
+      headers:
+        WWW-Authenticate:
+          schema: { type: string, example: 'Bearer realm="uptime-monitor"' }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: { code: unauthorized, message: Authentication required } }
+    Conflict:
+      description: The email is already registered.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: { code: conflict, message: Resource already exists } }
+    RateLimited:
+      description: Too many requests from this IP.
+      headers:
+        Retry-After:
+          description: Seconds until the next request is allowed.
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: { code: rate_limited, message: Too many requests } }
+    Internal:
+      description: Unexpected server error. Details are only in the server log.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: { code: internal, message: Internal server error } }
