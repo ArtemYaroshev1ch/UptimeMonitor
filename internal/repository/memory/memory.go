@@ -24,6 +24,13 @@ type failable struct {
 	err error
 }
 
+// failure returns the injected error, if any.
+func (f *failable) failure() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.err
+}
+
 // FailWith makes all subsequent calls return err (nil restores normal work).
 func (f *failable) FailWith(err error) {
 	f.mu.Lock()
